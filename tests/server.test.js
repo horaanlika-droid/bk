@@ -249,3 +249,55 @@ test("sheets fit the screen in older Telegram WebViews", async () => {
   assert.match(app, /viewportStableHeight/);
   assert.match(app, /disableVerticalSwipes/);
 });
+
+test("profile shows the version of the deployed build", async () => {
+  const app = await readFile(join(directory, "app.js"), "utf8");
+  const style = await readFile(join(directory, "style.css"), "utf8");
+  // The same content hash the server puts into app.js?v=… names the build.
+  assert.match(app, /const APP_VERSION = /);
+  assert.match(app, /script\[src\*="app\.js"\]/);
+  assert.match(app, /searchParams\.get\("v"\)/);
+  assert.match(app, /class="fine app-version">Версия \$\{APP_VERSION\}/);
+  assert.match(style, /\.app-version \{/);
+});
+
+test("app errors reach the bot with the exact text", async () => {
+  const source = await readFile(join(directory, "server.js"), "utf8");
+  assert.match(source, /⚠️ Ошибка в приложении/);
+  const app = await readFile(join(directory, "app.js"), "utf8");
+  // The toast keeps the exact error text in parentheses for a screenshot.
+  assert.match(app, /reportError/);
+  assert.match(app, /\(\$\{message\.slice\(0, 140\)\}\)/);
+  assert.match(app, /fail\("click", err, "Что-то пошло не так"\)/);
+  assert.match(app, /fail\("order", err, "Заказ не отправлен"\)/);
+  const send = (body) =>
+    fetch(base + "/api/client-error", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+  const ok = await send(
+    JSON.stringify({
+      message: "TypeError: true.map is not a function",
+      where: "click",
+      page: "menu",
+      version: "2026.09.27 · abcdef1234",
+    }),
+  );
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { ok: true });
+  // The same tap repeating the error must not flood the bot…
+  const again = await send(
+    JSON.stringify({
+      message: "TypeError: true.map is not a function",
+      where: "click",
+    }),
+  );
+  assert.equal(again.status, 200);
+  assert.equal((await again.json()).duplicate, true);
+  // …while a new message, an empty one and broken JSON are handled safely.
+  const other = await send(JSON.stringify({ message: "Другая ошибка" }));
+  assert.equal(other.status, 200);
+  assert.equal((await send(JSON.stringify({ message: "  " }))).status, 400);
+  assert.equal((await send("{")).status, 400);
+});

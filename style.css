@@ -1105,6 +1105,11 @@ main {
 .profile-form .fine {
   font-size: 10px;
 }
+.app-version {
+  margin-top: 30px;
+  text-align: center;
+  letter-spacing: 0.04em;
+}
 .overlay {
   position: fixed;
   /* Explicit sides instead of inset alone: inset is missing in older WebViews. */

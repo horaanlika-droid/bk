@@ -81,6 +81,43 @@ if (tgUser) {
       .join(" ");
   profile.telegramId = String(tgUser.id);
 }
+// The version at the bottom of the profile names this exact build: the same
+// content hash the server puts into app.js?v=…, so a screenshot of the profile
+// says which code the Mini App is actually running right now.
+const APP_VERSION = "2026.09.27";
+const buildHash = (() => {
+  try {
+    const src = document.querySelector('script[src*="app.js"]').src;
+    return (new URL(src).searchParams.get("v") || "dev").slice(0, 10);
+  } catch {
+    return "dev";
+  }
+})();
+// Unexpected failures must stay visible: the toast shows the exact error text
+// in parentheses, and the same text goes to the admins' bot as
+// «⚠️ Ошибка в приложении» — the fastest way to see what broke in Telegram.
+function reportError(where, err) {
+  const message = String((err && err.message) || err || "Неизвестная ошибка")
+    .replace(/\s+/g, " ")
+    .slice(0, 300);
+  try {
+    fetch("/api/client-error", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        where: String(where).slice(0, 80),
+        page: location.hash.slice(1) || "home",
+        version: APP_VERSION + " · " + buildHash,
+      }),
+    }).catch(() => {});
+  } catch {}
+  return message;
+}
+function fail(where, err, prefix) {
+  const message = reportError(where, err);
+  toast(`${prefix} (${message.slice(0, 140)})`);
+}
 const money = (n) => new Intl.NumberFormat("ru-RU").format(n) + " ₽";
 const safe = (s) =>
   String(s).replace(
@@ -220,7 +257,7 @@ function coinsPage() {
   return `<section class="coins-page"><div class="coins-dark"><span class="eyebrow">ПРИЯТНО БЫТЬ СВОИМ</span><h1>БК-Коины</h1><div class="coin-balance">${coin()}<div><strong>${coins()}</strong><span>БК-Коинов</span><small>1 БК-Коин = 1 ₽</small></div></div><div class="yellow-note"><b>Твой следующий кофе<br>становится ближе.</b><p>Начисляем 5% от суммы каждого заказа.</p>${icon("arrow")}</div><h2>Как это работает</h2><ol class="loyalty-steps"><li><span>${icon("cup")}</span><div><b>Выбирай любимое</b><p>Оформи заказ в приложении.</p></div></li><li><span>${coin()}</span><div><b>Получай БК-Коины</b><p>Заказ на 400 ₽ = 20 коинов.</p></div></li><li><span>${icon("gift")}</span><div><b>Копи на приятное</b><p>Оплата коинами появится позже.</p></div></li></ol><button class="outline-light" data-action="coinInfo">О бонусной программе ${icon("arrow")}</button></div><aside class="coins-aside"><span class="eyebrow">БОЛЬШОЙ КОФЕ · МАЛЕНЬКИЕ РАДОСТИ</span><h2>Всё начинается<br>с чашки кофе.</h2><p>Капучино по дороге на работу или неспешный латте в выходной — у каждого дня свой вкус.</p><a class="primary" href="#menu">Выбрать напиток ${icon("arrow")}</a><p class="fine">Бонусная программа пока работает в деморежиме: баланс хранится на этом устройстве и не синхронизируется. Списание коинов ещё недоступно.</p></aside></section>`;
 }
 function profilePage() {
-  return `<section class="profile-page"><div class="page-heading"><div><span class="eyebrow">РАДЫ, ЧТО ТЫ С НАМИ</span><h1>Профиль</h1></div></div><div class="profile-layout"><div class="profile-card"><div class="profile-avatar"><img src="assets/logo.png" alt=""></div><h2>${profile.name ? safe(profile.name) : "Привет, кофеман!"}</h2><p>${profile.phone ? safe(profile.phone) : "Здесь всё для твоего следующего заказа."}</p><a class="profile-coins" href="#coins">${coin()}<span>БК-Коины<strong>${coins()}</strong></span>${icon("arrow")}</a></div><form id="profileForm" class="profile-form"><h2>Давай познакомимся</h2><p>Имя и телефон помогут кофейне найти твой заказ.</p><label class="form-label" for="profName">Твоё имя</label><input id="profName" name="name" autocomplete="name" value="${safe(profile.name || "")}" placeholder="Как тебя зовут?" maxlength="80"><label class="form-label" for="profPhone">Телефон</label><input id="profPhone" name="phone" type="tel" autocomplete="tel" value="${safe(profile.phone || "")}" placeholder="+7 900 000-00-00" maxlength="30"><button class="primary" type="submit">Сохранить ${icon("check")}</button><p class="fine">Данные сохраняются на этом устройстве. Заказывать можно и без Telegram.</p></form></div></section>`;
+  return `<section class="profile-page"><div class="page-heading"><div><span class="eyebrow">РАДЫ, ЧТО ТЫ С НАМИ</span><h1>Профиль</h1></div></div><div class="profile-layout"><div class="profile-card"><div class="profile-avatar"><img src="assets/logo.png" alt=""></div><h2>${profile.name ? safe(profile.name) : "Привет, кофеман!"}</h2><p>${profile.phone ? safe(profile.phone) : "Здесь всё для твоего следующего заказа."}</p><a class="profile-coins" href="#coins">${coin()}<span>БК-Коины<strong>${coins()}</strong></span>${icon("arrow")}</a></div><form id="profileForm" class="profile-form"><h2>Давай познакомимся</h2><p>Имя и телефон помогут кофейне найти твой заказ.</p><label class="form-label" for="profName">Твоё имя</label><input id="profName" name="name" autocomplete="name" value="${safe(profile.name || "")}" placeholder="Как тебя зовут?" maxlength="80"><label class="form-label" for="profPhone">Телефон</label><input id="profPhone" name="phone" type="tel" autocomplete="tel" value="${safe(profile.phone || "")}" placeholder="+7 900 000-00-00" maxlength="30"><button class="primary" type="submit">Сохранить ${icon("check")}</button><p class="fine">Данные сохраняются на этом устройстве. Заказывать можно и без Telegram.</p></form></div><p class="fine app-version">Версия ${APP_VERSION} · ${buildHash}</p></section>`;
 }
 function render() {
   page = ["home", "menu", "coins", "profile"].includes(location.hash.slice(1))
@@ -525,7 +562,7 @@ async function submitOrder(e) {
       .querySelectorAll("input,select,button")
       .forEach((el) => (el.disabled = false));
     button.textContent = "Попробовать ещё раз · " + money(totals().total);
-    toast(err.message || "Проверь подключение и попробуй ещё раз");
+    fail("order", err, "Заказ не отправлен");
   }
 }
 function openLocation() {
@@ -545,7 +582,7 @@ function run(action) {
     action();
   } catch (err) {
     console.error("Большой Кофе:", err);
-    toast("Что-то пошло не так. Попробуй ещё раз");
+    fail("click", err, "Что-то пошло не так");
   }
 }
 document.addEventListener("click", (e) => {
@@ -665,5 +702,12 @@ async function loadMenu() {
     persist();
   }
 }
+// Anything not caught above (timers, listeners added later) is reported too.
+window.addEventListener("error", (e) => {
+  fail("window", e.error || e.message, "Что-то пошло не так");
+});
+window.addEventListener("unhandledrejection", (e) => {
+  fail("promise", e.reason, "Что-то пошло не так");
+});
 hydrateIcons();
 loadMenu();
