@@ -72,6 +72,11 @@ const photos = {
   lemonade: "lemonade",
 };
 function productArt(p) {
+  // The catalogue returned by the server carries the source menu image. Use it
+  // here instead of silently replacing it with an illustration; this keeps the
+  // menu data and the product cards in sync when the catalogue is updated.
+  if (p.image)
+    return `<img src="/${encodeURIComponent(p.image)}" alt="${safe(p.name)}" loading="lazy">`;
   if (photos[p.id])
     return `<img src="assets/${photos[p.id]}.webp" alt="${safe(p.name)}" loading="lazy">`;
   // Illustrations, not unrelated product photographs, for the remaining items.
@@ -110,7 +115,7 @@ function homePage() {
   <section class="popular-section"><div class="section-heading"><h2>Любимые, и не зря</h2><a class="text-link" href="#menu">Всё меню ${icon("arrow")}</a></div><div class="popular-grid">${statusMarkup() || popular.map((p) => productCard(p)).join("")}</div></section>
   <section class="cafe-card"><div class="cafe-copy"><span class="eyebrow">МЕСТО ДЛЯ ТВОИХ МАЛЕНЬКИХ ПАУЗ</span><h2>Большой кофе.<br>И чуть больше тепла.</h2><p>Встретиться с друзьями, побыть наедине с собой<br class="desktop-only"> или просто забежать за любимым.</p><button class="secondary" data-action="location">${icon("pin")}<span>${safe(branch)}</span>${icon("arrow")}</button></div><img src="assets/cafe.webp" alt="Фасад кофейни Большой Кофе" loading="lazy"><span class="cafe-caption">ХОРОШИЙ КОФЕ. КАЖДЫЙ ДЕНЬ.</span></section>`;
 }
-const cats = ["Всё", "Кофе", "Холодные", "Лимонады", "Чай", "Десерты"];
+const cats = ["Всё", "Кофе", "Чай", "Напитки", "Еда", "Десерты"];
 function menuPage() {
   return `<section class="menu-page"><div class="page-heading"><div><span class="eyebrow">ВЫБИРАЙ СВОЁ ЛЮБИМОЕ</span><h1>Меню</h1></div><span class="order-mode">${icon(type === "here" ? "chair" : "bag")}${type === "here" ? "В кофейне" : "С собой"}</span></div><label class="search-field">${icon("search")}<input id="search" type="search" placeholder="Найти свой напиток" value="${safe(search)}" aria-label="Поиск по меню"></label><nav class="categories" aria-label="Категории">${cats.map((c) => `<button data-cat="${c}" class="${selected === c ? "selected" : ""}" aria-pressed="${selected === c}">${c}</button>`).join("")}</nav><div id="menuResults">${menuResults()}</div></section>`;
 }

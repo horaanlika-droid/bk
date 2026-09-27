@@ -58,8 +58,8 @@ after(async () => {
 
 test("menu and public assets load with correct MIME types", async () => {
   const menu = await (await fetch(base + "/api/menu")).json();
-  assert.equal(menu.length, 10);
-  assert.equal(menu.find((item) => item.id === "latte").price, 220);
+  assert.equal(menu.length, 102);
+  assert.equal(menu.find((item) => item.id === "большой-латте").price, 200);
   for (const [url, type] of [
     ["/", "text/html"],
     ["/app.js", "text/javascript"],
@@ -95,7 +95,7 @@ test("checkout computes price and coins on the server, not from client input", a
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      items: [{ id: "latte", qty: 2, price: 1 }],
+      items: [{ id: "большой-латте", qty: 2, price: 1 }],
       total: 2,
       type: "here",
       branch: "Волжский",
@@ -104,8 +104,8 @@ test("checkout computes price and coins on the server, not from client input", a
   });
   assert.equal(response.status, 201);
   const result = await response.json();
-  assert.equal(result.total, 440);
-  assert.equal(result.coinsEarned, 22);
+  assert.equal(result.total, 400);
+  assert.equal(result.coinsEarned, 20);
   const orders = JSON.parse(
     await readFile(join(directory, "data/orders.json"), "utf8"),
   );
