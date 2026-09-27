@@ -12,6 +12,9 @@ const token = process.env.BOT_TOKEN || "",
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
+// Last client error reports per message text: one failure must not flood the
+// admins' bot when the same tap repeats the error.
+const recentErrors = {};
 const menu = [
   {
     "id": "хот-дог-бк",
@@ -1045,6 +1048,42 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/menu") return json(res, 200, catalogue);
   if (url.pathname === "/api/health")
     return json(res, 200, { ok: true, payments: "stub" });
+  if (url.pathname === "/api/client-error" && req.method === "POST") {
+    let raw = "";
+    for await (const c of req) raw += c;
+    try {
+      if (raw.length > 20000)
+        return json(res, 413, { error: "Слишком большое сообщение" });
+      const b = JSON.parse(raw);
+      const clean = (v, n) =>
+        String(v || "")
+          .replace(/[\u0000-\u001f\u007f]/g, " ")
+          .trim()
+          .slice(0, n);
+      const message = clean(b.message, 300);
+      if (!message) return json(res, 400, { error: "Пустое сообщение" });
+      const key = message.slice(0, 60) + "|" + clean(b.where, 40);
+      const now = Date.now();
+      if (recentErrors[key] && now - recentErrors[key] < 60000)
+        return json(res, 200, { ok: true, duplicate: true });
+      if (Object.keys(recentErrors).length > 500)
+        for (const k of Object.keys(recentErrors))
+          if (now - recentErrors[k] >= 60000) delete recentErrors[k];
+      recentErrors[key] = now;
+      for (const id of admins)
+        telegram("sendMessage", {
+          chat_id: id,
+          text: `⚠️ Ошибка в приложении\n${message}\n\nРаздел: ${
+            clean(b.page, 40) || "—"
+          }\nГде: ${clean(b.where, 80) || "—"}\nВерсия: ${
+            clean(b.version, 40) || "—"
+          }`,
+        });
+      return json(res, 200, { ok: true });
+    } catch {
+      return json(res, 400, { error: "Некорректный запрос" });
+    }
+  }
   if (url.pathname === "/api/orders" && req.method === "POST") {
     let raw = "";
     for await (const c of req) raw += c;
