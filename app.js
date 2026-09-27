@@ -19,18 +19,54 @@ if (tg) {
   if (tg.isVersionAtLeast?.("7.7"))
     tgCall(() => tg.disableVerticalSwipes());
 }
-// The Telegram WebView may be taller than the part the user actually sees
-// (the Mini App is not fully expanded), so 100vh/100dvh would put the bottom
-// sheet and its buttons off screen. Telegram reports the visible height.
-function syncViewport() {
-  const h = inTelegram && Number(tg.viewportStableHeight);
-  if (h > 0)
-    document.documentElement.style.setProperty("--app-height", h + "px");
+// The WebView is often taller than the part of the screen the user actually
+// sees: Telegram does not always report a viewport matching the window, iOS
+// keeps the layout viewport under the browser toolbar and the on-screen
+// keyboard, and 100dvh is a guess at best. That is how the bottom sheet and
+// its «Добавить» / «Оформить заказ» / «Всё понятно» buttons ended up below the
+// visible area — food, cart and coin info looked broken while short sheets
+// worked. So every available height is measured, the SMALLEST one wins and the
+// measurement repeats on every event that can change it. The sheet geometry
+// then follows --app-height, whatever the device reports.
+function viewportHeights() {
+  const list = [];
+  const vv = window.visualViewport;
+  if (vv && Number(vv.height) > 0) list.push(Number(vv.height));
+  if (Number(window.innerHeight) > 0) list.push(Number(window.innerHeight));
+  if (Number(document.documentElement.clientHeight) > 0)
+    list.push(Number(document.documentElement.clientHeight));
+  if (inTelegram) {
+    const h = Number(tg.viewportStableHeight || tg.viewportHeight);
+    if (h > 0) list.push(h);
+  }
+  return list;
 }
-if (inTelegram) {
-  syncViewport();
-  tgCall(() => tg.onEvent("viewportChanged", syncViewport));
+function measureViewport() {
+  const list = viewportHeights();
+  if (!list.length) return;
+  const visible = Math.round(Math.min.apply(null, list));
+  const root = document.documentElement;
+  root.style.setProperty("--app-height", visible + "px");
+  // iOS moves the visual viewport (toolbar, keyboard, page scroll): the sheet
+  // has to follow that rectangle, not the layout viewport.
+  const vv = window.visualViewport;
+  const top = vv && Number(vv.offsetTop) > 0 ? Math.round(Number(vv.offsetTop)) : 0;
+  root.style.setProperty("--vv-top", top + "px");
+  return visible;
 }
+const syncViewport = measureViewport;
+measureViewport();
+["resize", "orientationchange"].forEach((name) =>
+  window.addEventListener(name, () => measureViewport()),
+);
+// visualViewport is missing in old WebViews; a failure here must not stop the app.
+try {
+  window.visualViewport?.addEventListener("resize", measureViewport);
+  window.visualViewport?.addEventListener("scroll", measureViewport);
+} catch (err) {
+  console.warn("visualViewport:", err);
+}
+if (inTelegram) tgCall(() => tg.onEvent("viewportChanged", measureViewport));
 // Storage may be unavailable: private mode, blocked cookies or the Telegram
 // WebView can throw on read and on write. The app must keep working anyway —
 // a failed save never blocks adding to the cart.
@@ -66,6 +102,7 @@ let selected = "Всё",
   search = "",
   type = "pickup",
   menu = [],
+  menuSource = "",
   loading = true,
   loadError = false,
   submitting = false;
@@ -86,14 +123,38 @@ if (tgUser) {
 // content hash the server puts into app.js?v=…, so a screenshot of the profile
 // says which code the Mini App is actually running right now.
 const APP_VERSION = "2026.09.27";
+// The script tag is found by its file name, not by a substring: the Telegram
+// SDK lives at «…/telegram-web-app.js», which also contains «app.js» and was
+// matched first — the profile then showed «dev» instead of the real build hash.
 const buildHash = (() => {
   try {
-    const src = document.querySelector('script[src*="app.js"]').src;
-    return (new URL(src).searchParams.get("v") || "dev").slice(0, 10);
+    const tags = document.querySelectorAll("script[src]");
+    for (const tag of tags) {
+      const url = new URL(tag.getAttribute("src"), location.href);
+      if (/(^|\/)app\.js$/.test(url.pathname))
+        return (url.searchParams.get("v") || "dev").slice(0, 10);
+    }
+    return "dev";
   } catch {
     return "dev";
   }
 })();
+// The last failures stay on the device, not only in the console: «Профиль →
+// Диагностика» lists them, so a screenshot is enough to see what really broke
+// inside a Telegram WebView where no developer tools are available.
+const errorLog = (() => {
+  const cached = store.getJSON("bk-errors", []);
+  return Array.isArray(cached) ? cached.slice(-5) : [];
+})();
+function logError(where, message) {
+  errorLog.push({
+    at: new Date().toISOString().slice(11, 19),
+    where: String(where).slice(0, 60),
+    message: String(message).slice(0, 200),
+  });
+  while (errorLog.length > 5) errorLog.shift();
+  store.set("bk-errors", JSON.stringify(errorLog));
+}
 // Unexpected failures must stay visible: the toast shows the exact error text
 // in parentheses, and the same text goes to the admins' bot as
 // «⚠️ Ошибка в приложении» — the fastest way to see what broke in Telegram.
@@ -101,6 +162,7 @@ function reportError(where, err) {
   const message = String((err && err.message) || err || "Неизвестная ошибка")
     .replace(/\s+/g, " ")
     .slice(0, 300);
+  logError(where, message);
   try {
     fetch("/api/client-error", {
       method: "POST",
@@ -117,7 +179,71 @@ function reportError(where, err) {
 }
 function fail(where, err, prefix) {
   const message = reportError(where, err);
-  toast(`${prefix} (${message.slice(0, 140)})`);
+  // Longer than a regular toast: the text has to be readable long enough to be
+  // screenshotted, that is the whole point of showing it.
+  toast(`${prefix} (${message.slice(0, 140)}) · Профиль → Диагностика`, 9000);
+  return message;
+}
+// «The same errors came back after the fix» almost always means the WebView is
+// still running an old app.js from its cache, not that the fix failed. The
+// running build knows its own hash; the server names the current one. If they
+// differ, the page reloads itself once with a cache-busting URL — and if even
+// that does not help, the profile has a manual «Обновить приложение».
+let serverInfo = null,
+  updateState = "unknown"; // unknown | current | stale | offline
+const RELOADED_KEY = "bk-reloaded-for";
+async function checkVersion(manual = false) {
+  let info;
+  try {
+    const response = await fetch("/api/version?t=" + Date.now(), {
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    info = await response.json();
+  } catch (err) {
+    updateState = "offline";
+    if (manual)
+      toast("Проверить версию не вышло: " + reportError("version", err), 9000);
+    return updateState;
+  }
+  serverInfo = info;
+  const latest = String(info.hash || "");
+  // «dev» means the file was served without ?v=… (another host, a stripped
+  // query): there is nothing to compare, so nothing is reloaded.
+  if (buildHash === "dev") {
+    updateState = "unknown";
+    if (manual) toast("Версия без хеша — сравнить нельзя. Обновить принудительно?", 8000);
+    return updateState;
+  }
+  updateState = latest && latest !== buildHash ? "stale" : "current";
+  if (updateState === "current") {
+    if (manual) toast("Установлена последняя версия · " + buildHash);
+    return updateState;
+  }
+  // Two independent guards against a reload loop: the attempt is remembered on
+  // the device, and the cache-busting parameter stays in the address. Without
+  // them a WebView with blocked storage and a stale file would reload forever.
+  const previous = store.get(RELOADED_KEY);
+  const stored = store.set(RELOADED_KEY, latest);
+  const tried = /(^|[?&])build=/.test(location.search);
+  if (!stored || previous === latest || tried) {
+    if (manual)
+      toast(
+        "Хостинг отдаёт старую версию · работает " + buildHash + ", на сервере " + latest,
+        9000,
+      );
+    return updateState;
+  }
+  toast("Обновляем приложение до последней версии…", 4000);
+  setTimeout(forceReload, 900);
+  return updateState;
+}
+// A unique query makes every cache (CDN, WebView, service worker) fetch a fresh
+// index.html, and that fresh page carries the new app.js?v=… hash.
+function forceReload() {
+  location.replace(
+    location.pathname + "?build=" + Date.now() + (location.hash || ""),
+  );
 }
 const money = (n) => new Intl.NumberFormat("ru-RU").format(n) + " ₽";
 const safe = (s) =>
@@ -292,18 +418,38 @@ function profilePage() {
   const filled = !!(profile.name || profile.phone);
   const form = `<form id="profileForm" class="profile-form"><h2>${profileEditing ? "Изменить данные" : "Давай познакомимся"}</h2><p>Имя и телефон помогут кофейне найти твой заказ.</p><label class="form-label" for="profName">Твоё имя</label><input id="profName" name="name" autocomplete="name" value="${safe(profile.name || "")}" placeholder="Как тебя зовут?" maxlength="80"><label class="form-label" for="profPhone">Телефон</label><input id="profPhone" name="phone" type="tel" autocomplete="tel" value="${safe(profile.phone || "")}" placeholder="+7 900 000-00-00" maxlength="30"><button class="primary full" type="submit">Сохранить ${icon("check")}</button>${profileEditing ? `<button class="secondary full" type="button" data-action="profileCancel">Отмена</button>` : ""}<p class="fine">Данные сохраняются на этом устройстве. Заказывать можно и без Telegram.</p></form>`;
   const actions = `<div class="profile-actions"><button class="primary full" data-action="profileEdit">Изменить данные ${icon("arrow")}</button><button class="secondary full" data-action="profileLogout">Выйти из профиля</button></div>`;
-  return `<section class="profile-page"><div class="page-heading"><div><span class="eyebrow">РАДЫ, ЧТО ТЫ С НАМИ</span><h1>Профиль</h1></div></div><div class="profile-layout"><div class="profile-card"><div class="profile-avatar"><img src="assets/logo.png" alt=""></div><h2>${profile.name ? safe(profile.name) : "Привет, кофеман!"}</h2><p>${profile.phone ? safe(profile.phone) : "Здесь всё для твоего следующего заказа."}</p><a class="profile-coins" href="#coins">${coin()}<span>БК-Коины<strong>${coins()}</strong></span>${icon("arrow")}</a></div>${filled && !profileEditing ? actions : form}</div><p class="fine app-version">Версия ${APP_VERSION} · ${buildHash}</p></section>`;
+  // One tap to the build hash, the environment and the exact error text: what a
+  // screenshot has to show when the app misbehaves on someone else's phone.
+  const tools = `<div class="profile-tools"><button class="secondary full" data-action="diagnostics">Диагностика</button><button class="secondary full" data-action="update">Проверить обновление</button></div>`;
+  const versionState =
+    updateState === "stale"
+      ? " · есть обновление"
+      : updateState === "current"
+        ? " · последняя"
+        : "";
+  return `<section class="profile-page"><div class="page-heading"><div><span class="eyebrow">РАДЫ, ЧТО ТЫ С НАМИ</span><h1>Профиль</h1></div></div><div class="profile-layout"><div class="profile-card"><div class="profile-avatar"><img src="assets/logo.png" alt=""></div><h2>${profile.name ? safe(profile.name) : "Привет, кофеман!"}</h2><p>${profile.phone ? safe(profile.phone) : "Здесь всё для твоего следующего заказа."}</p><a class="profile-coins" href="#coins">${coin()}<span>БК-Коины<strong>${coins()}</strong></span>${icon("arrow")}</a></div>${filled && !profileEditing ? actions : form}</div>${tools}<p class="fine app-version">Версия ${APP_VERSION} · ${buildHash}${versionState}</p></section>`;
 }
 function render() {
   page = ["home", "menu", "coins", "profile"].includes(location.hash.slice(1))
     ? location.hash.slice(1)
     : "home";
-  $("#main").innerHTML = {
-    home: homePage,
-    menu: menuPage,
-    coins: coinsPage,
-    profile: profilePage,
-  }[page]();
+  // A page that fails to build must not leave a blank screen or a dead
+  // section: the reason is shown in place, with a way to update the app.
+  let markup;
+  try {
+    markup = {
+      home: homePage,
+      menu: menuPage,
+      coins: coinsPage,
+      profile: profilePage,
+    }[page]();
+  } catch (err) {
+    const message = reportError("page:" + page, err);
+    markup = `<section class="empty"><h3>Раздел не открылся</h3><p class="fine">${safe(
+      message,
+    )}</p><button class="secondary" data-action="reloadNow">Обновить приложение</button></section>`;
+  }
+  $("#main").innerHTML = markup;
   document.querySelectorAll("[data-page]").forEach((a) => {
     a.classList.toggle("active", a.dataset.page === page);
     if (a.dataset.page === page) a.setAttribute("aria-current", "page");
@@ -332,12 +478,57 @@ function render() {
     toast("Профиль сохранён");
   });
 }
-function toast(text) {
+function toast(text, ms = 3000) {
   const el = document.createElement("div");
   el.className = "toast";
   el.textContent = text;
   $("#announcements").append(el);
-  setTimeout(() => el.remove(), 3000);
+  setTimeout(() => el.remove(), ms);
+}
+// Clipboard is missing or blocked in many WebViews (it needs a secure context
+// and a user gesture). Every path is tried; when none works the text is shown
+// on screen, selected, so it can be copied by hand instead of being lost.
+function copyText(text, title) {
+  const manual = () => {
+    openSheet(
+      `${sheetHead(title || "Скопировать текст")}<p class="sheet-intro">Автокопирование недоступно в этом браузере — выдели текст и скопируй вручную.</p><textarea class="copy-area" readonly rows="8">${safe(text)}</textarea><p class="fine">Заказ можно сразу отправить кофейне в Telegram.</p><button class="primary full" data-action="close">Готово ${icon("check")}</button>`,
+    );
+    const area = $(".copy-area");
+    if (area) {
+      try {
+        area.focus();
+        area.select();
+      } catch (err) {
+        console.warn("copy:", err);
+      }
+    }
+    return false;
+  };
+  const done = (ok) => {
+    if (ok) toast("Скопировано");
+    return ok ? true : manual();
+  };
+  try {
+    if (navigator.clipboard?.writeText)
+      return navigator.clipboard
+        .writeText(text)
+        .then(() => done(true))
+        .catch(() => done(false));
+  } catch {}
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.left = "-9999px";
+    document.body.append(area);
+    area.select();
+    const ok = document.execCommand && document.execCommand("copy");
+    area.remove();
+    return Promise.resolve(done(!!ok));
+  } catch {
+    return Promise.resolve(done(false));
+  }
 }
 // Cart lines are keyed by product + chosen bread + extras, so the same sandwich
 // in different breads stays as separate lines: { [key]: { id, qty, bread?, extras? } }.
@@ -431,6 +622,10 @@ function sheetHead(title) {
   return `<div class="sheet-head"><h2 id="sheetTitle">${title}</h2><button class="icon-button" data-action="close" aria-label="Закрыть">${icon("close")}</button></div>`;
 }
 function openSheet(html, dark = false) {
+  // Fresh measurement right before the sheet appears: the keyboard or the
+  // Telegram chrome may have changed the visible area since page load, and the
+  // sheet has to be clamped to what the user can actually see and tap.
+  measureViewport();
   if ($("#overlay").hidden) returnFocus = document.activeElement;
   $("#sheet").innerHTML = html;
   $("#sheet").classList.toggle("dark-sheet", dark);
@@ -535,7 +730,7 @@ function openCart() {
       .filter((x) => x.info),
     { total } = totals();
   openSheet(
-    `${sheetHead("Корзина")}${items.length ? `<div class="cart-list">${items.map(({ key, line, info }) => { const p = info.p, k = safe(key), options = lineOptions(info); return `<div class="cart-row"><div class="cart-image ${hasArt(p) ? "art-tile" : "food-thumb"}">${hasArt(p) ? productArt(p) : breadIcon(info.bread?.id || "булочка")}</div><div class="cart-item-info"><b>${safe(p.name)}</b>${options ? `<small class="line-options">${safe(options)}</small>` : ""}<small>${money(info.price)} / шт.</small><div class="qty"><button data-dec="${k}" aria-label="Убрать один ${safe(p.name)}">−</button><span>${line.qty}</span><button data-inc="${k}" aria-label="Добавить один ${safe(p.name)}" ${line.qty >= 20 ? "disabled" : ""}>+</button></div></div><strong>${money(info.price * line.qty)}</strong></div>`; }).join("")}</div><div class="cart-coins">${coin()}<span>Начислим после оплаты заказа</span><b>+${Math.floor(total * 0.05)} коинов</b></div><div class="total-row"><span>Итого</span><strong>${money(total)}</strong></div><form id="checkoutForm"><div class="choice-row"><button type="button" class="choice ${type === "pickup" ? "selected" : ""}" data-type="pickup">${icon("bag")}С собой</button><button type="button" class="choice ${type === "here" ? "selected" : ""}" data-type="here">${icon("chair")}В кофейне</button></div><label class="form-label" for="branch">Город</label><select id="branch"><option ${branch === "Волжский" ? "selected" : ""}>Волжский</option><option ${branch === "Волгоград" ? "selected" : ""}>Волгоград</option></select><label class="form-label" for="customerName">Твоё имя</label><input id="customerName" autocomplete="name" placeholder="Имя" maxlength="80" required value="${safe(profile.name || "")}"><label class="form-label" for="customerPhone">Телефон для заказа</label><input id="customerPhone" type="tel" autocomplete="tel" placeholder="+7 900 000-00-00" maxlength="30" required value="${safe(profile.phone || "")}"><p class="fine">Оплата при получении. Выбор конкретной точки пока недоступен — кофейня уточнит место выдачи по телефону.</p><div class="sheet-footer"><button class="primary full" id="submitOrder">Оформить заказ · ${money(total)} ${icon("arrow")}</button></div></form>` : loading
+    `${sheetHead("Корзина")}${items.length ? `<div class="cart-list">${items.map(({ key, line, info }) => { const p = info.p, k = safe(key), options = lineOptions(info); return `<div class="cart-row"><div class="cart-image ${hasArt(p) ? "art-tile" : "food-thumb"}">${hasArt(p) ? productArt(p) : breadIcon(info.bread?.id || "булочка")}</div><div class="cart-item-info"><b>${safe(p.name)}</b>${options ? `<small class="line-options">${safe(options)}</small>` : ""}<small>${money(info.price)} / шт.</small><div class="qty"><button data-dec="${k}" aria-label="Убрать один ${safe(p.name)}">−</button><span>${line.qty}</span><button data-inc="${k}" aria-label="Добавить один ${safe(p.name)}" ${line.qty >= 20 ? "disabled" : ""}>+</button></div></div><strong>${money(info.price * line.qty)}</strong></div>`; }).join("")}</div><div class="cart-coins">${coin()}<span>Начислим после оплаты заказа</span><b>+${Math.floor(total * 0.05)} коинов</b></div><div class="total-row"><span>Итого</span><strong>${money(total)}</strong></div><form id="checkoutForm"><div class="choice-row"><button type="button" class="choice ${type === "pickup" ? "selected" : ""}" data-type="pickup">${icon("bag")}С собой</button><button type="button" class="choice ${type === "here" ? "selected" : ""}" data-type="here">${icon("chair")}В кофейне</button></div><label class="form-label" for="branch">Город</label><select id="branch"><option ${branch === "Волжский" ? "selected" : ""}>Волжский</option><option ${branch === "Волгоград" ? "selected" : ""}>Волгоград</option></select><label class="form-label" for="customerName">Твоё имя</label><input id="customerName" autocomplete="name" placeholder="Имя" maxlength="80" required value="${safe(profile.name || "")}"><label class="form-label" for="customerPhone">Телефон для заказа</label><input id="customerPhone" type="tel" autocomplete="tel" placeholder="+7 900 000-00-00" maxlength="30" required value="${safe(profile.phone || "")}"><p class="fine">Оплата при получении. Выбор конкретной точки пока недоступен — кофейня уточнит место выдачи по телефону.</p><div class="order-problem" id="orderProblem" hidden></div><div class="sheet-footer"><button class="primary full" id="submitOrder">Оформить заказ · ${money(total)} ${icon("arrow")}</button></div></form>` : loading
       ? `<div class="empty loading">Загружаем меню…</div>`
       : loadError
         ? `<div class="empty">${icon("bag")}<h3>Корзина ждёт меню</h3><p>Не получилось загрузить меню, поэтому заказ пока не собрать.</p><button class="secondary" data-action="retry">Попробовать ещё раз</button></div>`
@@ -549,6 +744,51 @@ function saveCheckoutDraft() {
     profile.phone = $("#customerPhone").value;
     branch = $("#branch").value;
   }
+}
+function orderText() {
+  const lines = Object.values(cart)
+    .map((line) => ({ line, info: lineInfo(line) }))
+    .filter((x) => x.info)
+    .map(
+      ({ line, info }, i) =>
+        `${i + 1}. ${info.p.name}${
+          lineOptions(info) ? " · " + lineOptions(info) : ""
+        } × ${line.qty} — ${money(info.price * line.qty)}`,
+    );
+  lines.push("");
+  lines.push("Итого: " + money(totals().total));
+  lines.push((type === "here" ? "В кофейне" : "С собой") + " · " + branch);
+  lines.push((profile.name || "—") + " · " + (profile.phone || "—"));
+  return "Заказ «Большой Кофе»\n" + lines.join("\n");
+}
+// A weak mobile network drops the first request often enough to be worth a
+// retry before the user is told the order failed.
+async function postOrder(payload) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      lastError = err;
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 900));
+    }
+  }
+  throw lastError;
+}
+// A failed send must not lose the order or the contacts: the form stays filled,
+// the exact reason is on screen and there are two ways out that do not depend
+// on the API — copy the order as text or write to the coffee shop directly.
+function showOrderProblem(message) {
+  const box = $("#orderProblem");
+  if (!box) return;
+  box.innerHTML = `<b>Заказ не отправлен</b><p class="fine">${safe(
+    message,
+  )}</p><div class="order-problem-actions"><button type="button" class="secondary" data-action="copyOrder">Скопировать заказ</button><a class="secondary" href="https://t.me/bk_kofe" target="_blank" rel="noopener">Написать в Telegram</a></div><p class="fine">Заказ и контакты сохранены: нажми «Попробовать ещё раз» или пришли текст заказа в Telegram — кофейня примет его и так.</p>`;
+  box.hidden = false;
 }
 async function submitOrder(e) {
   e.preventDefault();
@@ -568,20 +808,16 @@ async function submitOrder(e) {
     .querySelectorAll("input,select,button")
     .forEach((el) => (el.disabled = true));
   try {
-    const response = await fetch("/api/orders", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        items: Object.values(cart).map((line) => ({
-          id: line.id,
-          qty: line.qty,
-          bread: line.bread,
-          extras: line.extras,
-        })),
-        customer: profile,
-        branch,
-        type,
-      }),
+    const response = await postOrder({
+      items: Object.values(cart).map((line) => ({
+        id: line.id,
+        qty: line.qty,
+        bread: line.bread,
+        extras: line.extras,
+      })),
+      customer: profile,
+      branch,
+      type,
     });
     const result = await response.json();
     if (!response.ok)
@@ -602,7 +838,7 @@ async function submitOrder(e) {
       .querySelectorAll("input,select,button")
       .forEach((el) => (el.disabled = false));
     button.textContent = "Попробовать ещё раз · " + money(totals().total);
-    fail("order", err, "Заказ не отправлен");
+    showOrderProblem(fail("order", err, "Заказ не отправлен"));
   }
 }
 function openLocation() {
@@ -614,6 +850,161 @@ function openCoinInfo() {
   openSheet(
     `${sheetHead("Твои БК-Коины")}<div class="coin-info-art">${coin()}</div><div class="info-box"><h3>Приятное с каждым заказом</h3><p>Возвращаем 5% суммы целыми коинами, округляя вниз. Например, за 400 ₽ начислим 20 коинов — после оплаты заказа.</p><p>1 БК-Коин = 1 ₽. Списание бонусов пока не подключено.</p><p class="fine">Коины начисляет кофейня после оплаты, поэтому баланс одинаков на всех твоих устройствах.</p></div><button class="primary full" data-action="close">Всё понятно ${icon("check")}</button>`,
   );
+}
+// «Профиль → Диагностика»: everything a developer needs from a WebView without
+// developer tools — build hash, Telegram client, every height the layout could
+// be using, storage state, which menu source answered and the exact text of the
+// last failures. One screenshot replaces a round of guessing.
+const apiProbes = {};
+function pingApi() {
+  const urls = ["/api/health", "/api/menu", "/api/version", "/menu.json"];
+  return Promise.all(
+    urls.map(async (url) => {
+      const started = Date.now();
+      try {
+        const response = await fetch(url + "?probe=" + started, {
+          cache: "no-store",
+        });
+        apiProbes[url] = response.status + " · " + (Date.now() - started) + " мс";
+      } catch (err) {
+        apiProbes[url] =
+          "нет ответа (" + String((err && err.message) || err).slice(0, 50) + ")";
+      }
+    }),
+  );
+}
+function diagnosticsRows() {
+  const vv = window.visualViewport;
+  const state =
+    updateState === "stale"
+      ? " · есть обновление"
+      : updateState === "current"
+        ? " · последняя"
+        : updateState === "offline"
+          ? " · сервер не ответил"
+          : "";
+  return [
+    ["Версия приложения", APP_VERSION + " · " + buildHash + state],
+    [
+      "Версия на сервере",
+      serverInfo ? serverInfo.app + " · " + serverInfo.hash : "неизвестна",
+    ],
+    ["Источник меню", menuSource || (loading ? "загружается…" : "нет")],
+    ["Позиций в меню", String(menu.length)],
+    [
+      "Telegram",
+      inTelegram
+        ? "v" +
+          (tg.version || "?") +
+          " · " +
+          (tg.platform || "?") +
+          (tgUser ? " · id " + tgUser.id : " · без профиля")
+        : "не Telegram (браузер)",
+    ],
+    [
+      "Экран",
+      (window.screen ? screen.width + "×" + screen.height : "?") +
+        " · dpr " +
+        (window.devicePixelRatio || 1),
+    ],
+    [
+      "Высоты, px",
+      "document " +
+        document.documentElement.clientHeight +
+        " · окно " +
+        window.innerHeight +
+        (vv ? " · visualViewport " + Math.round(vv.height) : "") +
+        (inTelegram
+          ? " · Telegram " + (tg.viewportStableHeight || tg.viewportHeight || "—")
+          : ""),
+    ],
+    [
+      "--app-height",
+      getComputedStyle(document.documentElement)
+        .getPropertyValue("--app-height")
+        .trim() || "—",
+    ],
+    ["Хранилище", storageBroken ? "браузер блокирует" : "работает"],
+    ["Корзина", Object.keys(cart).length + " строк"],
+  ];
+}
+const diagnosticRow = ([key, value]) =>
+  `<div><dt>${safe(key)}</dt><dd>${safe(value)}</dd></div>`;
+function diagnosticsMarkup() {
+  const probes = Object.keys(apiProbes);
+  return `${sheetHead("Диагностика")}<p class="sheet-intro">Если что-то не работает — сделай скриншот этого экрана: здесь видно версию, окружение и текст ошибки.</p>
+  <dl class="diag">${diagnosticsRows().map(diagnosticRow).join("")}</dl>
+  <h3 class="diag-title">Доступность сервера</h3>
+  <dl class="diag">${
+    probes.length
+      ? probes.map((url) => diagnosticRow([url, apiProbes[url]])).join("")
+      : diagnosticRow(["Проверяем…", "…"])
+  }</dl>
+  <h3 class="diag-title">Последние ошибки</h3>
+  ${
+    errorLog.length
+      ? `<ul class="diag-errors">${errorLog
+          .map(
+            (e) =>
+              `<li><b>${safe(e.at)}</b> · ${safe(e.where)}<br>${safe(e.message)}</li>`,
+          )
+          .join("")}</ul>`
+      : '<p class="fine">Ошибок не было.</p>'
+  }
+  <div class="diag-actions">
+    <button class="secondary full" data-action="diagnosticsRefresh">Обновить проверку</button>
+    <button class="secondary full" data-action="diagnosticsCopy">Скопировать отчёт</button>
+    <button class="secondary full" data-action="diagnosticsSend">Отправить отчёт в кофейню</button>
+    <button class="primary full" data-action="update">Проверить обновление ${icon("arrow")}</button>
+    <button class="secondary full" data-action="reloadNow">Обновить приложение принудительно</button>
+  </div>`;
+}
+function openDiagnostics() {
+  openSheet(diagnosticsMarkup());
+  pingApi().then(() => {
+    // Only redraw while this very sheet is still the open one.
+    if ($("#sheetTitle")?.textContent === "Диагностика")
+      openSheet(diagnosticsMarkup());
+  });
+}
+function diagnosticsReport() {
+  const lines = diagnosticsRows().map(([key, value]) => key + ": " + value);
+  lines.push("Сервер:");
+  for (const [url, result] of Object.entries(apiProbes))
+    lines.push("  " + url + " → " + result);
+  lines.push("Ошибки:");
+  if (!errorLog.length) lines.push("  нет");
+  for (const e of errorLog) lines.push("  " + e.at + " [" + e.where + "] " + e.message);
+  lines.push("Адрес: " + location.href);
+  lines.push("Браузер: " + navigator.userAgent);
+  return "Отчёт диагностики Большой Кофе\n" + lines.join("\n");
+}
+function sendDiagnostics() {
+  const last = errorLog.length ? errorLog[errorLog.length - 1].message : "нет";
+  const summary =
+    `Диагностика ${APP_VERSION}·${buildHash} · ` +
+    (inTelegram ? `tg ${tg.version || "?"}/${tg.platform || "?"}` : "браузер") +
+    ` · меню ${menuSource || "нет"}` +
+    ` · ошибок ${errorLog.length}` +
+    ` · последняя: ${last}` +
+    ` · /api/health ${apiProbes["/api/health"] || "?"}`;
+  fetch("/api/client-error", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: summary.slice(0, 300),
+      where: "diagnostics",
+      page: page,
+      version: APP_VERSION + " · " + buildHash,
+    }),
+  })
+    .then((r) => {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      toast("Отчёт отправлен");
+    })
+    .catch((err) => {
+      toast("Отправить не вышло (" + String(err.message || err) + "). Скопируй отчёт", 8000);
+    });
 }
 // One broken action must never leave the interface dead: every handler runs
 // on its own, so a single failure cannot swallow the rest of the click.
@@ -679,6 +1070,19 @@ document.addEventListener("click", (e) => {
       closeSheet();
       location.hash = "menu";
     },
+    diagnostics: openDiagnostics,
+    diagnosticsRefresh: () => {
+      pingApi().then(() => openSheet(diagnosticsMarkup()));
+    },
+    diagnosticsCopy: () => copyText(diagnosticsReport(), "Отчёт диагностики"),
+    diagnosticsSend: sendDiagnostics,
+    update: () => checkVersion(true),
+    reloadNow: forceReload,
+    copyOrder: () => copyText(orderText(), "Текст заказа"),
+    orderRetry: () => {
+      closeSheet();
+      openCart();
+    },
   };
   if (b.dataset.action) run(() => actions[b.dataset.action]?.());
 });
@@ -722,20 +1126,44 @@ window.addEventListener("hashchange", () => {
   // Plain form: older WebViews throw on the "instant" scroll behavior.
   window.scrollTo(0, 0);
 });
+// Two sources for the same catalogue: the API (prices are checked there when an
+// order is placed) and the plain menu.json file the server also publishes. If
+// the API is down, blocked by a proxy or the whole host runs without Node, the
+// menu — and with it food, the sandwich builder and the cart — still opens
+// instead of «Не получилось загрузить меню».
+async function fetchMenu() {
+  const sources = ["/api/menu", "/menu.json"];
+  let lastError;
+  for (const url of sources) {
+    try {
+      const response = await fetch(url + "?t=" + Date.now(), {
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(url + ": HTTP " + response.status);
+      const data = await response.json();
+      if (!Array.isArray(data) || !data.length)
+        throw new Error(url + ": не список товаров");
+      return { data, url };
+    } catch (err) {
+      lastError = err;
+      logError("menu", err);
+    }
+  }
+  throw lastError || new Error("Меню недоступно");
+}
 async function loadMenu() {
   loading = true;
   loadError = false;
   render();
   try {
-    const response = await fetch("/api/menu");
-    if (!response.ok) throw new Error();
-    const data = await response.json();
-    if (!Array.isArray(data)) throw new Error();
+    const { data, url } = await fetchMenu();
     menu = data;
+    menuSource = url;
     // Never drop stored lines when the menu itself failed to load.
     cart = cleanCart(cart);
-  } catch {
+  } catch (err) {
     loadError = true;
+    reportError("menu", err);
   } finally {
     loading = false;
     render();
@@ -752,3 +1180,6 @@ window.addEventListener("unhandledrejection", (e) => {
 hydrateIcons();
 loadMenu();
 loadCoins();
+// Compares the running build with the one the server has. In a WebView with a
+// stale cache this is what finally brings the new code in.
+checkVersion();

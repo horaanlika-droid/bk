@@ -1122,28 +1122,39 @@ main {
 .overlay {
   position: fixed;
   /* Explicit sides instead of inset alone: inset is missing in older WebViews. */
-  top: 0;
+  top: var(--vv-top, 0);
   right: 0;
   left: 0;
-  inset: 0 0 auto;
+  inset: var(--vv-top, 0) 0 auto;
+  /* Follows the VISIBLE rectangle: --app-height is measured in app.js as the
+     smallest height the device reports (window, document, visualViewport,
+     Telegram), so the sheet and its buttons never end up under a toolbar,
+     under Telegram's chrome or under the on-screen keyboard. */
   height: var(--app-height);
   background: #0007;
   backdrop-filter: blur(5px);
   z-index: 60;
   display: flex;
   justify-content: center;
-  align-items: center;
+  /* Scrolling the overlay is the safety net: even if a sheet is taller than
+     the visible area, its «Добавить» / «Оформить заказ» stay reachable. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 28px;
 }
 .sheet {
   background: #fff;
   border-radius: 24px;
-  max-height: calc(var(--app-height) * 0.9);
+  max-height: calc(var(--app-height) - 56px);
   width: 100%;
   max-width: 490px;
+  /* Auto margins centre the sheet and, unlike align-items: center, keep the
+     top reachable when the sheet is taller than the screen. */
+  margin: auto;
   padding: 25px;
   overflow-y: auto;
   overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   outline: none;
   box-shadow: 0 20px 100px #0003;
 }
@@ -2136,10 +2147,14 @@ select {
     padding: 0;
   }
   .sheet {
-    max-height: calc(var(--app-height) * 0.92);
+    /* Bottom sheet on phones: the pinned action sits on the bottom edge of the
+       visible area, so it is on screen even on a tall sheet. The height comes
+       from the measured visible area, not from 100vh. */
+    max-height: calc(var(--app-height) - 8px);
     border-radius: 23px 23px 0 0;
     padding: 24px 21px calc(24px + env(safe-area-inset-bottom));
     max-width: 600px;
+    margin: auto auto 0;
   }
   .sheet-head {
     margin-bottom: 23px;
@@ -2589,4 +2604,104 @@ select {
     width: 32px;
     height: 32px;
   }
+}
+
+/* «Профиль → Диагностика»: the screen a user photographs when something breaks
+   on a device no developer can open. Plain rows, readable on a phone. */
+.profile-tools {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+.profile-tools .secondary {
+  flex: 1;
+}
+.diag {
+  margin: 0 0 4px;
+  font-size: 11px;
+}
+.diag > div {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+.diag dt {
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.diag dd {
+  margin: 0;
+  text-align: right;
+  word-break: break-word;
+}
+.diag-title {
+  font-size: 13px;
+  margin: 22px 0 8px;
+}
+.diag-errors {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 11px;
+}
+.diag-errors li {
+  margin-bottom: 8px;
+}
+.diag-errors b {
+  color: var(--muted);
+  font-weight: 700;
+}
+.diag-actions {
+  display: grid;
+  gap: 9px;
+  margin-top: 22px;
+}
+/* Shown inside the checkout form when /api/orders could not be reached: the
+   order is not lost, and there are two ways to send it without the API. */
+.order-problem {
+  border: 1px solid #f0d38a;
+  background: #fffaec;
+  border-radius: 14px;
+  padding: 14px 15px;
+  margin: 18px 0 0;
+  font-size: 11px;
+}
+.order-problem b {
+  font-size: 13px;
+}
+.order-problem p {
+  color: var(--muted);
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
+.order-problem-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 11px;
+}
+.order-problem-actions .secondary {
+  flex: 1 1 140px;
+  text-align: center;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Manual copy fallback: the text is shown and selected instead of lost when
+   the WebView blocks the clipboard. */
+.copy-area {
+  width: 100%;
+  min-height: 150px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px 13px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--soft);
+  resize: vertical;
+  margin-bottom: 14px;
 }

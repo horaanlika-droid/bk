@@ -17,6 +17,7 @@ before(async () => {
     "index.html",
     "style.css",
     "app.js",
+    "menu.json",
     "assets",
   ]) {
     await cp(new URL("../" + file, import.meta.url), join(directory, file), {
@@ -298,7 +299,11 @@ test("profile shows the version of the deployed build", async () => {
   const style = await readFile(join(directory, "style.css"), "utf8");
   // The same content hash the server puts into app.js?v=… names the build.
   assert.match(app, /const APP_VERSION = /);
-  assert.match(app, /script\[src\*="app\.js"\]/);
+  // The tag is matched by file name: /telegram-web-app.js also contains
+  // «app.js» and used to win, so the profile showed «dev» instead of the hash.
+  assert.match(app, /document\.querySelectorAll\("script\[src\]"\)/);
+  assert.match(app, /\/\(\^\|\\\/\)app\\\.js\$\/\.test\(url\.pathname\)/);
+  assert.doesNotMatch(app, /querySelector\('script\[src\*="app\.js"\]'\)/);
   assert.match(app, /searchParams\.get\("v"\)/);
   assert.match(app, /class="fine app-version">Версия \$\{APP_VERSION\}/);
   assert.match(style, /\.app-version \{/);
@@ -343,4 +348,85 @@ test("app errors reach the bot with the exact text", async () => {
   assert.equal(other.status, 200);
   assert.equal((await send(JSON.stringify({ message: "  " }))).status, 400);
   assert.equal((await send("{")).status, 400);
+});
+
+// The catalogue also ships as a plain file. A host without a running Node
+// server, or an API blocked by a proxy, must still open the menu — and with it
+// food, the sandwich builder and the cart — instead of «Не получилось
+// загрузить меню».
+test("the menu works without the API", async () => {
+  const response = await fetch(base + "/menu.json");
+  assert.equal(response.status, 200);
+  assert.ok(
+    response.headers.get("content-type").startsWith("application/json"),
+    "menu.json is served as JSON",
+  );
+  const file = await response.json();
+  const api = await (await fetch(base + "/api/menu")).json();
+  assert.deepEqual(
+    file.map((item) => item.id),
+    api.map((item) => item.id),
+    "the file and the API serve the same catalogue",
+  );
+  const app = await readFile(join(directory, "app.js"), "utf8");
+  assert.match(app, /const sources = \["\/api\/menu", "\/menu\.json"\]/);
+  assert.match(app, /menuSource = url/);
+  const source = await readFile(join(directory, "server.js"), "utf8");
+  assert.match(source, /const menu = JSON\.parse\(fs\.readFileSync/);
+});
+
+// «The same errors came back» usually means the WebView still runs an old
+// cached app.js, not that the fix failed: the running build asks the server
+// which build is current and reloads itself with a cache-busting URL.
+test("a stale running build can detect and refresh itself", async () => {
+  const version = await (await fetch(base + "/api/version")).json();
+  assert.match(version.hash, /^[0-9a-f]{10}$/);
+  const html = await (await fetch(base + "/")).text();
+  assert.equal(version.hash, html.match(/src="app\.js\?v=([0-9a-f]{10})"/)[1]);
+  assert.equal(
+    version.style,
+    html.match(/href="style\.css\?v=([0-9a-f]{10})"/)[1],
+  );
+  const app = await readFile(join(directory, "app.js"), "utf8");
+  assert.match(app, /fetch\("\/api\/version\?t=" \+ Date\.now\(\)/);
+  assert.match(app, /location\.pathname \+ "\?build=" \+ Date\.now\(\)/);
+  assert.match(app, /async function checkVersion/);
+  assert.match(app, /data-action="update"/);
+  assert.match(app, /data-action="reloadNow"/);
+  // A second reload for the same build is refused: no reload loop.
+  assert.match(app, /previous === latest/);
+});
+
+// The sheet is where cart, food and coin info broke in the field: heights are
+// compared and the smallest wins, the overlay scrolls as a safety net, and a
+// failed page or order never leaves a dead screen.
+test("sheets follow the visible area and failures never dead-end", async () => {
+  const app = await readFile(join(directory, "app.js"), "utf8");
+  const style = await readFile(join(directory, "style.css"), "utf8");
+  assert.match(app, /function measureViewport/);
+  assert.match(app, /Math\.min\.apply\(null, list\)/);
+  assert.match(app, /setProperty\("--vv-top"/);
+  assert.match(app, /\["resize", "orientationchange"\]\.forEach/);
+  assert.match(app, /visualViewport\?\.addEventListener\("resize", measureViewport\)/);
+  assert.ok(
+    app.indexOf("measureViewport();") < app.indexOf('$("#sheet").innerHTML = html'),
+    "the sheet is measured right before it opens",
+  );
+  assert.match(style, /\.overlay \{[^}]*overflow-y: auto/s);
+  assert.match(style, /\.overlay \{[^}]*top: var\(--vv-top/s);
+  assert.match(style, /\.sheet \{[^}]*margin: auto/s);
+  // A page that cannot be built shows why instead of a blank screen.
+  assert.match(app, /reportError\("page:" \+ page, err\)/);
+  // A failed order keeps the cart, retries once and can leave without the API.
+  assert.match(app, /async function postOrder/);
+  assert.match(app, /for \(let attempt = 0; attempt < 2; attempt\+\+\)/);
+  assert.match(app, /function showOrderProblem/);
+  assert.match(app, /id="orderProblem"/);
+  assert.match(app, /data-action="copyOrder"/);
+  assert.match(app, /function copyText/);
+  // Diagnostics: the environment and the exact error text in one screenshot.
+  assert.match(app, /function diagnosticsReport/);
+  assert.match(app, /data-action="diagnostics"/);
+  assert.match(app, /logError\(where, message\)/);
+  assert.match(app, /class="fine app-version">Версия \$\{APP_VERSION\}/);
 });
