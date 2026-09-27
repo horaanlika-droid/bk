@@ -2519,6 +2519,19 @@ select {
   border-color: var(--yellow);
   color: var(--ink);
 }
+/* Sheets can be long (sandwich builder, checkout): the main action stays
+   pinned to the bottom edge, so it is always in sight and tappable. */
+.sheet-footer {
+  position: sticky;
+  bottom: -25px;
+  z-index: 2;
+  margin: 4px -25px -25px;
+  padding: 18px 25px 25px;
+  background: linear-gradient(180deg, #ffffff00 0, #fff 18px);
+}
+.sheet-footer .builder-summary {
+  margin-bottom: 10px;
+}
 .builder-summary {
   font-size: 11px;
   color: var(--muted);
@@ -2531,6 +2544,12 @@ select {
   color: #5d5d58;
 }
 @media (max-width: 600px) {
+  /* The sheet padding changes on phones, the pinned action follows it. */
+  .sheet-footer {
+    bottom: calc(-24px - env(safe-area-inset-bottom));
+    margin: 4px -21px calc(-24px - env(safe-area-inset-bottom));
+    padding: 18px 21px calc(24px + env(safe-area-inset-bottom));
+  }
   .bread-options {
     gap: 8px;
   }
