@@ -175,3 +175,39 @@ test("sandwich builder: bread is required, extras are priced on the server", asy
   assert.deepEqual(saved[0].extras, ["Мясо", "Соус гриль"]);
   assert.equal(saved[1].bread, "В лепёшке");
 });
+
+// The cart is the part of the app that broke most in the field: a browser that
+// blocks storage must not stop adding to the cart, and the sheet actions must
+// stay visible on a phone screen.
+test("interface keeps working when the browser blocks storage", async () => {
+  const source = await readFile(join(directory, "app.js"), "utf8");
+  const direct = source
+    .split("\n")
+    .map((line, index) => [index + 1, line.trim()])
+    .filter(([, line]) => /localStorage\.(get|set|remove)Item/.test(line));
+  assert.equal(direct.length, 3, "localStorage is used only by the safe store");
+  const start = source.split("\n").findIndex((l) => l.includes("const store = {")) + 1;
+  const end = source
+    .split("\n")
+    .findIndex((l, i) => i > start && l === "};");
+  assert.ok(
+    direct.every(([line]) => line > start && line < end),
+    "every localStorage call sits inside the safe store helper",
+  );
+  assert.match(source, /cart = store\.getJSON\("bk-cart"/);
+  assert.match(source, /if \(!store\.set\("bk-cart"/);
+  // The success path must not depend on the write: persist draws the cart first.
+  const persist = source.slice(source.indexOf("function persist()"));
+  assert.ok(
+    persist.indexOf("drawCart()") < persist.indexOf("store.set(\"bk-cart\""),
+    "persist redraws the cart before saving it",
+  );
+});
+
+test("sheet actions are pinned to the bottom of the sheet", async () => {
+  const app = await readFile(join(directory, "app.js"), "utf8");
+  const style = await readFile(join(directory, "style.css"), "utf8");
+  assert.match(app, /class="sheet-footer"><button class="primary full" id="submitOrder"/);
+  assert.match(app, /class="sheet-footer"><div class="builder-summary"/);
+  assert.match(style, /\.sheet-footer \{[^}]*position: sticky/s);
+});

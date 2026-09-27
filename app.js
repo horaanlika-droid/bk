@@ -2,16 +2,37 @@ const $ = (s) => document.querySelector(s);
 const tg = window.Telegram?.WebApp;
 tg?.ready();
 tg?.expand();
-const read = (key, fallback) => {
-  try {
-    return JSON.parse(localStorage.getItem(key)) ?? fallback;
-  } catch {
-    return fallback;
-  }
+// Storage may be unavailable: private mode, blocked cookies or the Telegram
+// WebView can throw on read and on write. The app must keep working anyway —
+// a failed save never blocks adding to the cart.
+const store = {
+  get(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  getJSON(key, fallback) {
+    try {
+      return JSON.parse(localStorage.getItem(key)) ?? fallback;
+    } catch {
+      return fallback;
+    }
+  },
+  set(key, value) {
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch {
+      return false;
+    }
+  },
 };
-let profile = read("bk-profile", {}),
-  cart = read("bk-cart", {});
-let branch = localStorage.getItem("bk-branch") || "Волжский";
+let storageBroken = false;
+let profile = store.getJSON("bk-profile", {}),
+  cart = store.getJSON("bk-cart", {});
+let branch = store.get("bk-branch") || "Волжский";
 let selected = "Всё",
   search = "",
   type = "pickup",
@@ -37,7 +58,7 @@ const safe = (s) =>
         c
       ],
   );
-const coins = () => Math.max(0, Number(localStorage.getItem("bk-coins")) || 0);
+const coins = () => Math.max(0, Number(store.get("bk-coins")) || 0);
 const paths = {
   home: '<path d="m3 10 9-7 9 7v10H15v-7H9v7H3z"/>',
   cup: '<path d="M5 7h12v9a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4zM17 8h2a3 3 0 0 1 0 6h-2M8 3v1m4-1v1M3 22h16"/>',
@@ -200,7 +221,7 @@ function render() {
     e.preventDefault();
     profile.name = $("#profName").value.trim();
     profile.phone = $("#profPhone").value.trim();
-    localStorage.setItem("bk-profile", JSON.stringify(profile));
+    store.set("bk-profile", JSON.stringify(profile));
     render();
     toast("Профиль сохранён");
   });
@@ -259,8 +280,12 @@ function totals() {
   );
 }
 function persist() {
-  localStorage.setItem("bk-cart", JSON.stringify(cart));
+  // Redraw first: the cart in the interface must react even if saving fails.
   drawCart();
+  if (!store.set("bk-cart", JSON.stringify(cart)) && !storageBroken) {
+    storageBroken = true;
+    toast("Корзина не сохранится: браузер блокирует хранилище");
+  }
 }
 function drawCart() {
   const { qty, total } = totals();
@@ -348,8 +373,8 @@ function openBuilder(id) {
             .join("")}</div></fieldset>`,
       )
       .join("")}
-    <div class="builder-summary" id="builderSummary" aria-live="polite"></div>
-    <button class="primary full" id="builderSubmit" type="submit"></button></form>`,
+    <div class="sheet-footer"><div class="builder-summary" id="builderSummary" aria-live="polite"></div>
+    <button class="primary full" id="builderSubmit" type="submit"></button></div></form>`,
   );
   const form = $("#builderForm");
   const update = () => {
@@ -358,11 +383,11 @@ function openBuilder(id) {
       [...form.querySelectorAll('input[name="extra"]:checked')].map((x) => x.value),
     );
     const info = lineInfo({ id, bread: builder.bread, extras: [...builder.extras] });
-    const parts = [
-      info.bread ? info.bread.name : "Хлеб не выбран",
-      ...info.extras.map((e) => e.name.toLowerCase()),
-    ];
-    $("#builderSummary").textContent = parts.join(" · ");
+    // No bread yet: the step above and the pinned button already say what to
+    // do, so the summary stays empty instead of repeating it.
+    $("#builderSummary").textContent = info.bread
+      ? [info.bread.name, ...info.extras.map((e) => e.name.toLowerCase())].join(" · ")
+      : "";
     $("#builderSubmit").innerHTML = info.bread
       ? `Добавить · ${money(info.price)} ${icon("plus")}`
       : `Выбери, в чём приготовить`;
@@ -396,7 +421,11 @@ function openCart() {
       .filter((x) => x.info),
     { total } = totals();
   openSheet(
-    `${head("Корзина")}${items.length ? `<div class="cart-list">${items.map(({ key, line, info }) => { const p = info.p, k = safe(key), options = lineOptions(info); return `<div class="cart-row"><div class="cart-image ${hasArt(p) ? "art-tile" : "food-thumb"}">${hasArt(p) ? productArt(p) : breadIcon(info.bread?.id || "булочка")}</div><div class="cart-item-info"><b>${safe(p.name)}</b>${options ? `<small class="line-options">${safe(options)}</small>` : ""}<small>${money(info.price)} / шт.</small><div class="qty"><button data-dec="${k}" aria-label="Убрать один ${safe(p.name)}">−</button><span>${line.qty}</span><button data-inc="${k}" aria-label="Добавить один ${safe(p.name)}" ${line.qty >= 20 ? "disabled" : ""}>+</button></div></div><strong>${money(info.price * line.qty)}</strong></div>`; }).join("")}</div><div class="cart-coins">${coin()}<span>Начислим за этот заказ</span><b>+${Math.floor(total * 0.05)} коинов</b></div><div class="total-row"><span>Итого</span><strong>${money(total)}</strong></div><form id="checkoutForm"><div class="choice-row"><button type="button" class="choice ${type === "pickup" ? "selected" : ""}" data-type="pickup">${icon("bag")}С собой</button><button type="button" class="choice ${type === "here" ? "selected" : ""}" data-type="here">${icon("chair")}В кофейне</button></div><label class="form-label" for="branch">Город</label><select id="branch"><option ${branch === "Волжский" ? "selected" : ""}>Волжский</option><option ${branch === "Волгоград" ? "selected" : ""}>Волгоград</option></select><label class="form-label" for="customerName">Твоё имя</label><input id="customerName" autocomplete="name" placeholder="Имя" maxlength="80" required value="${safe(profile.name || "")}"><label class="form-label" for="customerPhone">Телефон для заказа</label><input id="customerPhone" type="tel" autocomplete="tel" placeholder="+7 900 000-00-00" maxlength="30" required value="${safe(profile.phone || "")}"><p class="fine">Оплата при получении. Выбор конкретной точки пока недоступен — кофейня уточнит место выдачи по телефону.</p><button class="primary full" id="submitOrder">Оформить заказ · ${money(total)} ${icon("arrow")}</button></form>` : `<div class="empty">${icon("bag")}<h3>Здесь будет твой кофе</h3><p>Добавь что-нибудь вкусное из меню.</p><button class="primary" data-action="toMenu">Выбрать напиток ${icon("arrow")}</button></div>`}`,
+    `${head("Корзина")}${items.length ? `<div class="cart-list">${items.map(({ key, line, info }) => { const p = info.p, k = safe(key), options = lineOptions(info); return `<div class="cart-row"><div class="cart-image ${hasArt(p) ? "art-tile" : "food-thumb"}">${hasArt(p) ? productArt(p) : breadIcon(info.bread?.id || "булочка")}</div><div class="cart-item-info"><b>${safe(p.name)}</b>${options ? `<small class="line-options">${safe(options)}</small>` : ""}<small>${money(info.price)} / шт.</small><div class="qty"><button data-dec="${k}" aria-label="Убрать один ${safe(p.name)}">−</button><span>${line.qty}</span><button data-inc="${k}" aria-label="Добавить один ${safe(p.name)}" ${line.qty >= 20 ? "disabled" : ""}>+</button></div></div><strong>${money(info.price * line.qty)}</strong></div>`; }).join("")}</div><div class="cart-coins">${coin()}<span>Начислим за этот заказ</span><b>+${Math.floor(total * 0.05)} коинов</b></div><div class="total-row"><span>Итого</span><strong>${money(total)}</strong></div><form id="checkoutForm"><div class="choice-row"><button type="button" class="choice ${type === "pickup" ? "selected" : ""}" data-type="pickup">${icon("bag")}С собой</button><button type="button" class="choice ${type === "here" ? "selected" : ""}" data-type="here">${icon("chair")}В кофейне</button></div><label class="form-label" for="branch">Город</label><select id="branch"><option ${branch === "Волжский" ? "selected" : ""}>Волжский</option><option ${branch === "Волгоград" ? "selected" : ""}>Волгоград</option></select><label class="form-label" for="customerName">Твоё имя</label><input id="customerName" autocomplete="name" placeholder="Имя" maxlength="80" required value="${safe(profile.name || "")}"><label class="form-label" for="customerPhone">Телефон для заказа</label><input id="customerPhone" type="tel" autocomplete="tel" placeholder="+7 900 000-00-00" maxlength="30" required value="${safe(profile.phone || "")}"><p class="fine">Оплата при получении. Выбор конкретной точки пока недоступен — кофейня уточнит место выдачи по телефону.</p><div class="sheet-footer"><button class="primary full" id="submitOrder">Оформить заказ · ${money(total)} ${icon("arrow")}</button></div></form>` : loading
+      ? `<div class="empty loading">Загружаем меню…</div>`
+      : loadError
+        ? `<div class="empty">${icon("bag")}<h3>Корзина ждёт меню</h3><p>Не получилось загрузить меню, поэтому заказ пока не собрать.</p><button class="secondary" data-action="retry">Попробовать ещё раз</button></div>`
+        : `<div class="empty">${icon("bag")}<h3>Здесь будет твой кофе</h3><p>Добавь что-нибудь вкусное из меню.</p><button class="primary" data-action="toMenu">Выбрать напиток ${icon("arrow")}</button></div>`}`,
   );
   $("#checkoutForm")?.addEventListener("submit", submitOrder);
 }
@@ -443,9 +472,9 @@ async function submitOrder(e) {
     const result = await response.json();
     if (!response.ok)
       throw new Error(result.error || "Не удалось оформить заказ");
-    localStorage.setItem("bk-profile", JSON.stringify(profile));
-    localStorage.setItem("bk-branch", branch);
-    localStorage.setItem("bk-coins", String(coins() + result.coinsEarned));
+    store.set("bk-profile", JSON.stringify(profile));
+    store.set("bk-branch", branch);
+    store.set("bk-coins", String(coins() + result.coinsEarned));
     cart = {};
     persist();
     render();
@@ -472,45 +501,61 @@ function openCoinInfo() {
     `${head("Твои БК-Коины")}<div class="coin-info-art">${coin()}</div><div class="info-box"><h3>Приятное с каждым заказом</h3><p>Возвращаем 5% суммы целыми коинами, округляя вниз. Например, за 400 ₽ начислим 20 коинов.</p><p>1 БК-Коин = 1 ₽. Списание бонусов пока не подключено.</p><p class="fine">Демобаланс хранится в браузере на этом устройстве. Это пока не полноценный бонусный счёт: нет синхронизации, серверной защиты и истории начислений.</p></div><button class="primary full" data-action="close">Всё понятно ${icon("check")}</button>`,
   );
 }
+// One broken action must never leave the interface dead: every handler runs
+// on its own, so a single failure cannot swallow the rest of the click.
+function run(action) {
+  try {
+    action();
+  } catch (err) {
+    console.error("Большой Кофе:", err);
+    toast("Что-то пошло не так. Попробуй ещё раз");
+  }
+}
 document.addEventListener("click", (e) => {
   const b = e.target.closest("button");
   if (!b || b.disabled) return;
-  if (b.dataset.add) addProduct(b.dataset.add);
-  if (b.dataset.detail) productDetail(b.dataset.detail);
-  if (b.dataset.detailAdd) {
-    addProduct(b.dataset.detailAdd);
-    closeSheet();
-  }
-  if (b.dataset.cat) {
-    selected = b.dataset.cat;
-    render();
-  }
-  if (b.dataset.order) {
-    type = b.dataset.order;
-    location.hash = "menu";
-  }
-  if (b.dataset.inc || b.dataset.dec) {
-    saveCheckoutDraft();
-    const key = b.dataset.inc || b.dataset.dec;
-    if (cart[key]) {
-      cart[key].qty = Math.min(20, cart[key].qty + (b.dataset.inc ? 1 : -1));
-      if (cart[key].qty <= 0) delete cart[key];
-    }
-    persist();
-    openCart();
-  }
-  if (b.dataset.type) {
-    saveCheckoutDraft();
-    type = b.dataset.type;
-    openCart();
-  }
-  if (b.dataset.city) {
-    branch = b.dataset.city;
-    localStorage.setItem("bk-branch", branch);
-    render();
-    closeSheet();
-    toast("Выбран город: " + branch);
-  }
+  // For buttons inside the sheet one of these never matches; keep the order.
+  if (b.dataset.add) run(() => addProduct(b.dataset.add));
+  if (b.dataset.detail) run(() => productDetail(b.dataset.detail));
+  if (b.dataset.detailAdd)
+    run(() => {
+      if (addProduct(b.dataset.detailAdd) !== false) closeSheet();
+    });
+  if (b.dataset.cat)
+    run(() => {
+      selected = b.dataset.cat;
+      render();
+    });
+  if (b.dataset.order)
+    run(() => {
+      type = b.dataset.order;
+      location.hash = "menu";
+    });
+  if (b.dataset.inc || b.dataset.dec)
+    run(() => {
+      saveCheckoutDraft();
+      const key = b.dataset.inc || b.dataset.dec;
+      if (cart[key]) {
+        cart[key].qty = Math.min(20, cart[key].qty + (b.dataset.inc ? 1 : -1));
+        if (cart[key].qty <= 0) delete cart[key];
+      }
+      persist();
+      openCart();
+    });
+  if (b.dataset.type)
+    run(() => {
+      saveCheckoutDraft();
+      type = b.dataset.type;
+      openCart();
+    });
+  if (b.dataset.city)
+    run(() => {
+      branch = b.dataset.city;
+      store.set("bk-branch", branch);
+      render();
+      closeSheet();
+      toast("Выбран город: " + branch);
+    });
   const actions = {
     close: closeSheet,
     location: openLocation,
@@ -521,10 +566,11 @@ document.addEventListener("click", (e) => {
       location.hash = "menu";
     },
   };
-  actions[b.dataset.action]?.();
+  if (b.dataset.action) run(() => actions[b.dataset.action]?.());
 });
-$("#locationTop").onclick = openLocation;
-$("#cartTop").onclick = $("#floatingCart").onclick = openCart;
+$("#locationTop").addEventListener("click", () => run(openLocation));
+$("#cartTop").addEventListener("click", () => run(openCart));
+$("#floatingCart").addEventListener("click", () => run(openCart));
 $("#overlay").onclick = (e) => {
   if (e.target === $("#overlay")) closeSheet();
 };
@@ -571,14 +617,14 @@ async function loadMenu() {
     const data = await response.json();
     if (!Array.isArray(data)) throw new Error();
     menu = data;
+    // Never drop stored lines when the menu itself failed to load.
     cart = cleanCart(cart);
-    persist();
   } catch {
     loadError = true;
   } finally {
     loading = false;
     render();
-    drawCart();
+    persist();
   }
 }
 hydrateIcons();
