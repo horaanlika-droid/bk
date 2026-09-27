@@ -133,6 +133,49 @@ test("empty or invalid checkout is rejected", async () => {
   }
 });
 
+test("coins are credited only by the admin after payment", async () => {
+  const placed = await fetch(base + "/api/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      items: [{ id: "эспрессо", qty: 2 }],
+      type: "pickup",
+      branch: "Волгоград",
+      customer: { name: "Тест", phone: "+7 (999) 111-22-33" },
+    }),
+  });
+  const result = await placed.json();
+  assert.equal(result.total, 280);
+  assert.equal(result.coinsEarned, 14);
+  // Until the admin confirms the payment the balance stays zero: the client
+  // only sees how many coins are promised after payment.
+  const before = await (
+    await fetch(
+      base + "/api/coins?phone=" + encodeURIComponent("+7 999 111 22 33"),
+    )
+  ).json();
+  assert.deepEqual(before, { coins: 0, pending: 14 });
+  // The client cannot credit itself: no write endpoint for coins exists.
+  assert.equal(
+    (await fetch(base + "/api/coins", { method: "POST", body: "{}" })).status,
+    405,
+  );
+  const orders = JSON.parse(
+    await readFile(join(directory, "data/orders.json"), "utf8"),
+  );
+  assert.equal(orders.at(-1).credited, false);
+  // The bot is what credits: only an admin may press the payment button.
+  const source = await readFile(join(directory, "server.js"), "utf8");
+  assert.match(source, /admins\.includes\(String\(q\.from\.id\)\)/);
+  assert.match(source, /callback_data: "paid:" \+ order\.id/);
+  assert.match(source, /Начислять коины может только администратор/);
+  assert.match(source, /function markPaid\(/);
+  assert.doesNotMatch(
+    source,
+    /url\.pathname === "\/api\/coins" && req\.method === "POST"/,
+  );
+});
+
 test("sandwich builder: bread is required, extras are priced on the server", async () => {
   const menu = await (await fetch(base + "/api/menu")).json();
   const caesar = menu.find((item) => item.id === "цезарь");
