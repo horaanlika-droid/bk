@@ -70,6 +70,7 @@ let selected = "Всё",
   loadError = false,
   submitting = false;
 let page = "home",
+  profileEditing = false,
   returnFocus;
 const tgUser = tg?.initDataUnsafe?.user;
 if (tgUser) {
@@ -127,7 +128,36 @@ const safe = (s) =>
         c
       ],
   );
-const coins = () => Math.max(0, Number(store.get("bk-coins")) || 0);
+// The balance is kept on the server: only the coffee shop admin credits coins,
+// and only after the order is actually paid. localStorage is just a display
+// cache so the number survives a reload without a round trip.
+let coinBalance = Math.max(0, Number(store.get("bk-coins")) || 0),
+  coinPending = 0;
+const coins = () => coinBalance;
+async function loadCoins() {
+  const phone = profile.phone ? "phone=" + encodeURIComponent(profile.phone) : "";
+  const uid =
+    !phone && profile.telegramId
+      ? "uid=" + encodeURIComponent(profile.telegramId)
+      : "";
+  const query = phone || uid;
+  if (!query) {
+    coinBalance = 0;
+    coinPending = 0;
+    return;
+  }
+  try {
+    const r = await fetch("/api/coins?" + query);
+    if (!r.ok) throw new Error();
+    const d = await r.json();
+    coinBalance = Math.max(0, Number(d.coins) || 0);
+    coinPending = Math.max(0, Number(d.pending) || 0);
+    store.set("bk-coins", String(coinBalance));
+    if (page === "home" || page === "coins" || page === "profile") render();
+  } catch {
+    // Offline: the cached balance stays on screen, nothing breaks.
+  }
+}
 const paths = {
   home: '<path d="m3 10 9-7 9 7v10H15v-7H9v7H3z"/>',
   cup: '<path d="M5 7h12v9a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4zM17 8h2a3 3 0 0 1 0 6h-2M8 3v1m4-1v1M3 22h16"/>',
@@ -201,7 +231,7 @@ function homePage() {
     .map((id) => menu.find((p) => p.id === id))
     .filter(Boolean);
   return `<section class="welcome"><div><span class="eyebrow">ТВОЯ ЕЖЕДНЕВНАЯ ПАУЗА</span><h1>Как насчёт кофе?</h1></div><span class="welcome-note">Знакомый вкус.<br>Всегда рядом.</span></section>
-  <div class="home-top"><a class="coin-banner" href="#coins"><div class="banner-copy"><span class="eyebrow">БОЛЬШЕ КОФЕ — БОЛЬШЕ ПРИЯТНОГО</span><h2>БК-Коины</h2><p>Твой кофе возвращается.<br>Копи 5% с каждого заказа.</p><span class="banner-balance">${coins()} <span>коинов на счёте</span>${icon("arrow")}</span></div><div class="coin-scene">${coin("coin-back")}${coin("coin-main")}<span class="coin-spark spark-one"></span><span class="coin-spark spark-two"></span></div></a>
+  <div class="home-top"><a class="coin-banner" href="#coins"><div class="banner-copy"><span class="eyebrow">БОЛЬШЕ КОФЕ — БОЛЬШЕ ПРИЯТНОГО</span><h2>БК-Коины</h2><p>Твой кофе возвращается.<br>Копи 5% с каждого оплаченного заказа.</p><span class="banner-balance">${coins()} <span>коинов на счёте</span>${icon("arrow")}</span></div><div class="coin-scene">${coin("coin-back")}${coin("coin-main")}<span class="coin-spark spark-one"></span><span class="coin-spark spark-two"></span></div></a>
   <div class="order-options"><button class="order-option" data-order="pickup">${icon("cup")}<span class="option-arrow">${icon("arrow")}</span><h3>Заказать<br>с собой</h3><p>Забери свой кофе<br>по пути</p></button><button class="order-option" data-order="here">${icon("chair")}<span class="option-arrow">${icon("arrow")}</span><h3>Я уже<br>в кофейне</h3><p>Выбирай любимое.<br>Мы приготовим.</p></button></div></div>
   <section class="popular-section"><div class="section-heading"><h2>Любимые, и не зря</h2><a class="text-link" href="#menu">Всё меню ${icon("arrow")}</a></div><div class="popular-grid">${statusMarkup() || popular.map((p) => productCard(p)).join("")}</div></section>
   <section class="cafe-card"><div class="cafe-copy"><span class="eyebrow">МЕСТО ДЛЯ ТВОИХ МАЛЕНЬКИХ ПАУЗ</span><h2>Большой кофе.<br>И чуть больше тепла.</h2><p>Встретиться с друзьями, побыть наедине с собой<br class="desktop-only"> или просто забежать за любимым.</p><button class="secondary" data-action="location">${icon("pin")}<span>${safe(branch)}</span>${icon("arrow")}</button></div><img src="assets/cafe.webp" alt="Фасад кофейни Большой Кофе" loading="lazy"><span class="cafe-caption">ХОРОШИЙ КОФЕ. КАЖДЫЙ ДЕНЬ.</span></section>`;
@@ -254,10 +284,15 @@ function menuResults() {
     .join("");
 }
 function coinsPage() {
-  return `<section class="coins-page"><div class="coins-dark"><span class="eyebrow">ПРИЯТНО БЫТЬ СВОИМ</span><h1>БК-Коины</h1><div class="coin-balance">${coin()}<div><strong>${coins()}</strong><span>БК-Коинов</span><small>1 БК-Коин = 1 ₽</small></div></div><div class="yellow-note"><b>Твой следующий кофе<br>становится ближе.</b><p>Начисляем 5% от суммы каждого заказа.</p>${icon("arrow")}</div><h2>Как это работает</h2><ol class="loyalty-steps"><li><span>${icon("cup")}</span><div><b>Выбирай любимое</b><p>Оформи заказ в приложении.</p></div></li><li><span>${coin()}</span><div><b>Получай БК-Коины</b><p>Заказ на 400 ₽ = 20 коинов.</p></div></li><li><span>${icon("gift")}</span><div><b>Копи на приятное</b><p>Оплата коинами появится позже.</p></div></li></ol><button class="outline-light" data-action="coinInfo">О бонусной программе ${icon("arrow")}</button></div><aside class="coins-aside"><span class="eyebrow">БОЛЬШОЙ КОФЕ · МАЛЕНЬКИЕ РАДОСТИ</span><h2>Всё начинается<br>с чашки кофе.</h2><p>Капучино по дороге на работу или неспешный латте в выходной — у каждого дня свой вкус.</p><a class="primary" href="#menu">Выбрать напиток ${icon("arrow")}</a><p class="fine">Бонусная программа пока работает в деморежиме: баланс хранится на этом устройстве и не синхронизируется. Списание коинов ещё недоступно.</p></aside></section>`;
+  return `<section class="coins-page"><div class="coins-dark"><span class="eyebrow">ПРИЯТНО БЫТЬ СВОИМ</span><h1>БК-Коины</h1><div class="coin-balance">${coin()}<div><strong>${coins()}</strong><span>БК-Коинов</span><small>1 БК-Коин = 1 ₽</small></div></div><div class="yellow-note"><b>Твой следующий кофе<br>становится ближе.</b><p>Начисляем 5% от суммы каждого оплаченного заказа.${coinPending ? " Ещё " + coinPending + " коинов начислим после оплаты твоих заказов." : ""}</p>${icon("arrow")}</div><h2>Как это работает</h2><ol class="loyalty-steps"><li><span>${icon("cup")}</span><div><b>Выбирай любимое</b><p>Оформи заказ в приложении.</p></div></li><li><span>${coin()}</span><div><b>Получай БК-Коины</b><p>Заказ на 400 ₽ = 20 коинов — после оплаты.</p></div></li><li><span>${icon("gift")}</span><div><b>Копи на приятное</b><p>Оплата коинами появится позже.</p></div></li></ol><button class="outline-light" data-action="coinInfo">О бонусной программе ${icon("arrow")}</button></div><aside class="coins-aside"><span class="eyebrow">БОЛЬШОЙ КОФЕ · МАЛЕНЬКИЕ РАДОСТИ</span><h2>Всё начинается<br>с чашки кофе.</h2><p>Капучино по дороге на работу или неспешный латте в выходной — у каждого дня свой вкус.</p><a class="primary" href="#menu">Выбрать напиток ${icon("arrow")}</a><p class="fine">Коины начисляет кофейня после оплаты заказа, поэтому баланс одинаков на всех твоих устройствах. Списание коинов ещё недоступно.</p></aside></section>`;
 }
 function profilePage() {
-  return `<section class="profile-page"><div class="page-heading"><div><span class="eyebrow">РАДЫ, ЧТО ТЫ С НАМИ</span><h1>Профиль</h1></div></div><div class="profile-layout"><div class="profile-card"><div class="profile-avatar"><img src="assets/logo.png" alt=""></div><h2>${profile.name ? safe(profile.name) : "Привет, кофеман!"}</h2><p>${profile.phone ? safe(profile.phone) : "Здесь всё для твоего следующего заказа."}</p><a class="profile-coins" href="#coins">${coin()}<span>БК-Коины<strong>${coins()}</strong></span>${icon("arrow")}</a></div><form id="profileForm" class="profile-form"><h2>Давай познакомимся</h2><p>Имя и телефон помогут кофейне найти твой заказ.</p><label class="form-label" for="profName">Твоё имя</label><input id="profName" name="name" autocomplete="name" value="${safe(profile.name || "")}" placeholder="Как тебя зовут?" maxlength="80"><label class="form-label" for="profPhone">Телефон</label><input id="profPhone" name="phone" type="tel" autocomplete="tel" value="${safe(profile.phone || "")}" placeholder="+7 900 000-00-00" maxlength="30"><button class="primary" type="submit">Сохранить ${icon("check")}</button><p class="fine">Данные сохраняются на этом устройстве. Заказывать можно и без Telegram.</p></form></div><p class="fine app-version">Версия ${APP_VERSION} · ${buildHash}</p></section>`;
+  // Saved profile data stays visible as a card; the form itself hides behind
+  // its own «Изменить» button, and logout clears everything in one tap.
+  const filled = !!(profile.name || profile.phone);
+  const form = `<form id="profileForm" class="profile-form"><h2>${profileEditing ? "Изменить данные" : "Давай познакомимся"}</h2><p>Имя и телефон помогут кофейне найти твой заказ.</p><label class="form-label" for="profName">Твоё имя</label><input id="profName" name="name" autocomplete="name" value="${safe(profile.name || "")}" placeholder="Как тебя зовут?" maxlength="80"><label class="form-label" for="profPhone">Телефон</label><input id="profPhone" name="phone" type="tel" autocomplete="tel" value="${safe(profile.phone || "")}" placeholder="+7 900 000-00-00" maxlength="30"><button class="primary full" type="submit">Сохранить ${icon("check")}</button>${profileEditing ? `<button class="secondary full" type="button" data-action="profileCancel">Отмена</button>` : ""}<p class="fine">Данные сохраняются на этом устройстве. Заказывать можно и без Telegram.</p></form>`;
+  const actions = `<div class="profile-actions"><button class="primary full" data-action="profileEdit">Изменить данные ${icon("arrow")}</button><button class="secondary full" data-action="profileLogout">Выйти из профиля</button></div>`;
+  return `<section class="profile-page"><div class="page-heading"><div><span class="eyebrow">РАДЫ, ЧТО ТЫ С НАМИ</span><h1>Профиль</h1></div></div><div class="profile-layout"><div class="profile-card"><div class="profile-avatar"><img src="assets/logo.png" alt=""></div><h2>${profile.name ? safe(profile.name) : "Привет, кофеман!"}</h2><p>${profile.phone ? safe(profile.phone) : "Здесь всё для твоего следующего заказа."}</p><a class="profile-coins" href="#coins">${coin()}<span>БК-Коины<strong>${coins()}</strong></span>${icon("arrow")}</a></div>${filled && !profileEditing ? actions : form}</div><p class="fine app-version">Версия ${APP_VERSION} · ${buildHash}</p></section>`;
 }
 function render() {
   page = ["home", "menu", "coins", "profile"].includes(location.hash.slice(1))
@@ -291,6 +326,8 @@ function render() {
     profile.name = $("#profName").value.trim();
     profile.phone = $("#profPhone").value.trim();
     store.set("bk-profile", JSON.stringify(profile));
+    profileEditing = false;
+    loadCoins();
     render();
     toast("Профиль сохранён");
   });
@@ -387,7 +424,10 @@ function addProduct(id) {
   if (isSandwich(p)) return openBuilder(id);
   addLine({ id });
 }
-function head(title) {
+// Sheet header markup. Never name this helper `head`: in some WebViews bare
+// `head` resolves to document.head (HTMLHeadElement) and the call dies with
+// «head is not a function», killing the whole sheet.
+function sheetHead(title) {
   return `<div class="sheet-head"><h2 id="sheetTitle">${title}</h2><button class="icon-button" data-action="close" aria-label="Закрыть">${icon("close")}</button></div>`;
 }
 function openSheet(html, dark = false) {
@@ -419,7 +459,7 @@ function productDetail(id) {
     ? "Рисунок временный — фото напитка появится позже. Уточнить состав можно у бариста."
     : "Уточнить состав можно у бариста.";
   openSheet(
-    `${head(safe(p.name))}${art}<div class="detail-description"><h3>${safe(p.name)} <span>${money(p.price)}</span></h3>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}<p class="fine">${note}</p></div><button class="primary full" data-detail-add="${p.id}">Добавить в корзину · ${money(p.price)} ${icon("plus")}</button>`,
+    `${sheetHead(safe(p.name))}${art}<div class="detail-description"><h3>${safe(p.name)} <span>${money(p.price)}</span></h3>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}<p class="fine">${note}</p></div><button class="primary full" data-detail-add="${p.id}">Добавить в корзину · ${money(p.price)} ${icon("plus")}</button>`,
   );
 }
 let builder = null;
@@ -431,7 +471,7 @@ function openBuilder(id) {
   const extras = p.extras || [];
   const groups = [...new Set(extras.map((e) => e.group))];
   openSheet(
-    `${head(safe(p.name))}<form id="builderForm" class="builder" novalidate><p class="builder-desc">${safe(p.desc)}</p>
+    `${sheetHead(safe(p.name))}<form id="builderForm" class="builder" novalidate><p class="builder-desc">${safe(p.desc)}</p>
     <fieldset class="builder-step" id="breadStep"><legend><span class="step-num">1</span><span>В чём приготовить?</span>${choice ? '<small class="required-tag">обязательно</small>' : ""}</legend>
     <div class="bread-options ${choice ? "" : "single"}">${p.breads.map((b) => `<label class="bread-option"><input type="radio" name="bread" value="${b.id}" ${choice ? "" : "checked"}><span class="option-card">${breadIcon(b.id)}<span>${safe(b.name)}</span><i class="option-check">${icon("check")}</i></span></label>`).join("")}</div>
     ${choice ? "" : '<p class="fine">Эта позиция готовится только в лепёшке.</p>'}</fieldset>
@@ -495,7 +535,7 @@ function openCart() {
       .filter((x) => x.info),
     { total } = totals();
   openSheet(
-    `${head("Корзина")}${items.length ? `<div class="cart-list">${items.map(({ key, line, info }) => { const p = info.p, k = safe(key), options = lineOptions(info); return `<div class="cart-row"><div class="cart-image ${hasArt(p) ? "art-tile" : "food-thumb"}">${hasArt(p) ? productArt(p) : breadIcon(info.bread?.id || "булочка")}</div><div class="cart-item-info"><b>${safe(p.name)}</b>${options ? `<small class="line-options">${safe(options)}</small>` : ""}<small>${money(info.price)} / шт.</small><div class="qty"><button data-dec="${k}" aria-label="Убрать один ${safe(p.name)}">−</button><span>${line.qty}</span><button data-inc="${k}" aria-label="Добавить один ${safe(p.name)}" ${line.qty >= 20 ? "disabled" : ""}>+</button></div></div><strong>${money(info.price * line.qty)}</strong></div>`; }).join("")}</div><div class="cart-coins">${coin()}<span>Начислим за этот заказ</span><b>+${Math.floor(total * 0.05)} коинов</b></div><div class="total-row"><span>Итого</span><strong>${money(total)}</strong></div><form id="checkoutForm"><div class="choice-row"><button type="button" class="choice ${type === "pickup" ? "selected" : ""}" data-type="pickup">${icon("bag")}С собой</button><button type="button" class="choice ${type === "here" ? "selected" : ""}" data-type="here">${icon("chair")}В кофейне</button></div><label class="form-label" for="branch">Город</label><select id="branch"><option ${branch === "Волжский" ? "selected" : ""}>Волжский</option><option ${branch === "Волгоград" ? "selected" : ""}>Волгоград</option></select><label class="form-label" for="customerName">Твоё имя</label><input id="customerName" autocomplete="name" placeholder="Имя" maxlength="80" required value="${safe(profile.name || "")}"><label class="form-label" for="customerPhone">Телефон для заказа</label><input id="customerPhone" type="tel" autocomplete="tel" placeholder="+7 900 000-00-00" maxlength="30" required value="${safe(profile.phone || "")}"><p class="fine">Оплата при получении. Выбор конкретной точки пока недоступен — кофейня уточнит место выдачи по телефону.</p><div class="sheet-footer"><button class="primary full" id="submitOrder">Оформить заказ · ${money(total)} ${icon("arrow")}</button></div></form>` : loading
+    `${sheetHead("Корзина")}${items.length ? `<div class="cart-list">${items.map(({ key, line, info }) => { const p = info.p, k = safe(key), options = lineOptions(info); return `<div class="cart-row"><div class="cart-image ${hasArt(p) ? "art-tile" : "food-thumb"}">${hasArt(p) ? productArt(p) : breadIcon(info.bread?.id || "булочка")}</div><div class="cart-item-info"><b>${safe(p.name)}</b>${options ? `<small class="line-options">${safe(options)}</small>` : ""}<small>${money(info.price)} / шт.</small><div class="qty"><button data-dec="${k}" aria-label="Убрать один ${safe(p.name)}">−</button><span>${line.qty}</span><button data-inc="${k}" aria-label="Добавить один ${safe(p.name)}" ${line.qty >= 20 ? "disabled" : ""}>+</button></div></div><strong>${money(info.price * line.qty)}</strong></div>`; }).join("")}</div><div class="cart-coins">${coin()}<span>Начислим после оплаты заказа</span><b>+${Math.floor(total * 0.05)} коинов</b></div><div class="total-row"><span>Итого</span><strong>${money(total)}</strong></div><form id="checkoutForm"><div class="choice-row"><button type="button" class="choice ${type === "pickup" ? "selected" : ""}" data-type="pickup">${icon("bag")}С собой</button><button type="button" class="choice ${type === "here" ? "selected" : ""}" data-type="here">${icon("chair")}В кофейне</button></div><label class="form-label" for="branch">Город</label><select id="branch"><option ${branch === "Волжский" ? "selected" : ""}>Волжский</option><option ${branch === "Волгоград" ? "selected" : ""}>Волгоград</option></select><label class="form-label" for="customerName">Твоё имя</label><input id="customerName" autocomplete="name" placeholder="Имя" maxlength="80" required value="${safe(profile.name || "")}"><label class="form-label" for="customerPhone">Телефон для заказа</label><input id="customerPhone" type="tel" autocomplete="tel" placeholder="+7 900 000-00-00" maxlength="30" required value="${safe(profile.phone || "")}"><p class="fine">Оплата при получении. Выбор конкретной точки пока недоступен — кофейня уточнит место выдачи по телефону.</p><div class="sheet-footer"><button class="primary full" id="submitOrder">Оформить заказ · ${money(total)} ${icon("arrow")}</button></div></form>` : loading
       ? `<div class="empty loading">Загружаем меню…</div>`
       : loadError
         ? `<div class="empty">${icon("bag")}<h3>Корзина ждёт меню</h3><p>Не получилось загрузить меню, поэтому заказ пока не собрать.</p><button class="secondary" data-action="retry">Попробовать ещё раз</button></div>`
@@ -548,13 +588,13 @@ async function submitOrder(e) {
       throw new Error(result.error || "Не удалось оформить заказ");
     store.set("bk-profile", JSON.stringify(profile));
     store.set("bk-branch", branch);
-    store.set("bk-coins", String(coins() + result.coinsEarned));
+    loadCoins();
     cart = {};
     persist();
     render();
     submitting = false;
     openSheet(
-      `${head("Заказ принят")}<div class="success"><div class="success-check">${icon("check")}</div><span class="eyebrow">ЗАКАЗ № ${safe(result.id)}</span><h2>Спасибо за заказ!</h2><p>${type === "here" ? "Подойди к стойке и назови номер заказа." : "Город: " + safe(branch) + ". Кофейня уточнит место выдачи по телефону."}<br>Оплата при получении.</p><div class="success-coins">${coin()}<b>+${result.coinsEarned} БК-Коинов</b></div><p class="fine">Это подтверждение приёма заказа приложением, не статус приготовления.</p><button class="primary full" data-action="close">Отлично ${icon("check")}</button></div>`,
+      `${sheetHead("Заказ принят")}<div class="success"><div class="success-check">${icon("check")}</div><span class="eyebrow">ЗАКАЗ № ${safe(result.id)}</span><h2>Спасибо за заказ!</h2><p>${type === "here" ? "Подойди к стойке и назови номер заказа." : "Город: " + safe(branch) + ". Кофейня уточнит место выдачи по телефону."}<br>Оплата при получении.</p><div class="success-coins">${coin()}<b>+${result.coinsEarned} БК-Коинов после оплаты</b></div><p class="fine">Кофейня начислит коины, когда оплатишь заказ, — они появятся в разделе «Коины». Это подтверждение приёма заказа приложением, не статус приготовления.</p><button class="primary full" data-action="close">Отлично ${icon("check")}</button></div>`,
     );
   } catch (err) {
     submitting = false;
@@ -567,12 +607,12 @@ async function submitOrder(e) {
 }
 function openLocation() {
   openSheet(
-    `${head("Где встретимся?")}<p class="sheet-intro">Выбери город для своего заказа.</p><div class="city-options">${["Волжский", "Волгоград"].map((c) => `<button data-city="${c}" class="city-option ${branch === c ? "selected" : ""}">${icon("pin")}<span>${c}</span>${icon(branch === c ? "check" : "arrow")}</button>`).join("")}</div><p class="fine">Адреса конкретных кофеен появятся после уточнения у команды. Пока выбираем только город.</p>`,
+    `${sheetHead("Где встретимся?")}<p class="sheet-intro">Выбери город для своего заказа.</p><div class="city-options">${["Волжский", "Волгоград"].map((c) => `<button data-city="${c}" class="city-option ${branch === c ? "selected" : ""}">${icon("pin")}<span>${c}</span>${icon(branch === c ? "check" : "arrow")}</button>`).join("")}</div><p class="fine">Адреса конкретных кофеен появятся после уточнения у команды. Пока выбираем только город.</p>`,
   );
 }
 function openCoinInfo() {
   openSheet(
-    `${head("Твои БК-Коины")}<div class="coin-info-art">${coin()}</div><div class="info-box"><h3>Приятное с каждым заказом</h3><p>Возвращаем 5% суммы целыми коинами, округляя вниз. Например, за 400 ₽ начислим 20 коинов.</p><p>1 БК-Коин = 1 ₽. Списание бонусов пока не подключено.</p><p class="fine">Демобаланс хранится в браузере на этом устройстве. Это пока не полноценный бонусный счёт: нет синхронизации, серверной защиты и истории начислений.</p></div><button class="primary full" data-action="close">Всё понятно ${icon("check")}</button>`,
+    `${sheetHead("Твои БК-Коины")}<div class="coin-info-art">${coin()}</div><div class="info-box"><h3>Приятное с каждым заказом</h3><p>Возвращаем 5% суммы целыми коинами, округляя вниз. Например, за 400 ₽ начислим 20 коинов — после оплаты заказа.</p><p>1 БК-Коин = 1 ₽. Списание бонусов пока не подключено.</p><p class="fine">Коины начисляет кофейня после оплаты, поэтому баланс одинаков на всех твоих устройствах.</p></div><button class="primary full" data-action="close">Всё понятно ${icon("check")}</button>`,
   );
 }
 // One broken action must never leave the interface dead: every handler runs
@@ -711,3 +751,4 @@ window.addEventListener("unhandledrejection", (e) => {
 });
 hydrateIcons();
 loadMenu();
+loadCoins();

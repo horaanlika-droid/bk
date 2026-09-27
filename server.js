@@ -976,6 +976,52 @@ const read = () => {
     return [];
   }
 };
+const coinsFile = path.join(dataDir, "coins.json");
+const readCoins = () => {
+  try {
+    return JSON.parse(fs.readFileSync(coinsFile, "utf8"));
+  } catch {
+    return {};
+  }
+};
+// Balance key: the phone is always collected at checkout and works on any
+// device; the Telegram id is only a fallback for orders without a phone.
+const coinsKey = (customer) => {
+  const phone = String(customer?.phone || "").replace(/\D/g, "");
+  const uid = String(customer?.telegramId || "").replace(/\D/g, "");
+  return phone ? "phone:" + phone : uid ? "tg:" + uid : "";
+};
+const plannedCoins = (total) => Math.floor(total * 0.05);
+// Coins move only here: the admin taps the button under the order in the bot
+// after the customer has actually paid. Nothing in the HTTP API can credit.
+function creditCoins(order) {
+  const key = coinsKey(order.customer);
+  if (!key) return 0;
+  const balances = readCoins();
+  const amount = plannedCoins(order.total);
+  const entry = balances[key] || { coins: 0, history: [] };
+  entry.coins += amount;
+  entry.history.unshift({
+    order: order.id,
+    amount,
+    at: new Date().toISOString(),
+  });
+  balances[key] = entry;
+  fs.writeFileSync(coinsFile, JSON.stringify(balances, null, 2));
+  return amount;
+}
+function markPaid(orderId) {
+  const orders = read();
+  const order = orders.find((o) => o.id === orderId);
+  if (!order) return { error: "Заказ не найден" };
+  if (order.credited) return { error: `Заказ #${order.id} уже оплачен` };
+  const amount = creditCoins(order);
+  order.status = "Оплачен";
+  order.credited = true;
+  order.paidAt = new Date().toISOString();
+  fs.writeFileSync(file, JSON.stringify(orders, null, 2));
+  return { order, amount };
+}
 function json(res, status, obj) {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
@@ -1010,8 +1056,50 @@ async function updateBot() {
       if (j.ok)
         for (const u of j.result) {
           offset = u.update_id + 1;
+          // The button under the order notification is the only way coins
+          // ever move, and only an admin can press it.
+          const q = u.callback_query;
+          if (q && /^paid:/.test(String(q.data || ""))) {
+            const id = String(q.data).slice(5);
+            if (!admins.includes(String(q.from.id))) {
+              await telegram("answerCallbackQuery", {
+                callback_query_id: q.id,
+                text: "Начислять коины может только администратор",
+              });
+              continue;
+            }
+            const result = markPaid(id);
+            await telegram("answerCallbackQuery", {
+              callback_query_id: q.id,
+              text: result.error
+                ? result.error
+                : `Начислено ${result.amount} БК-Коинов за заказ #${result.order.id}`,
+            });
+            if (!result.error && q.message)
+              await telegram("editMessageText", {
+                chat_id: q.message.chat.id,
+                message_id: q.message.message_id,
+                text:
+                  (q.message.text || "") +
+                  `\n\n✅ Оплачен · начислено ${result.amount} БК-Коинов`,
+                reply_markup: JSON.stringify({ inline_keyboard: [] }),
+              });
+            continue;
+          }
           const m = u.message;
           if (m && admins.includes(String(m.chat.id))) {
+            // Text alternative to the button: /paid <номер заказа>.
+            const paid = /^\/paid\s+(\S+)/.exec(m.text || "");
+            if (paid) {
+              const result = markPaid(paid[1]);
+              await telegram("sendMessage", {
+                chat_id: m.chat.id,
+                text: result.error
+                  ? result.error
+                  : `✅ Заказ #${result.order.id} оплачен · начислено ${result.amount} БК-Коинов`,
+              });
+              continue;
+            }
             if (/^\/(start|orders)/.test(m.text || "")) {
               const orders = read().slice(-8).reverse();
               await telegram("sendMessage", {
@@ -1020,7 +1108,7 @@ async function updateBot() {
                   ? orders
                       .map(
                         (o) =>
-                          `#${o.id} · ${o.status}\n${o.customer.name} · ${o.customer.phone}\n${o.items.map((i) => `${lineTitle(i)} × ${i.qty}`).join(", ")}\n${o.type === "here" ? "В кофейне" : "К выдаче"} · ${o.branch}\n${money(o.total)}`,
+                          `#${o.id} · ${o.status}${o.credited ? ` · +${o.coinsEarned} коинов` : ""}\n${o.customer.name} · ${o.customer.phone}\n${o.items.map((i) => `${lineTitle(i)} × ${i.qty}`).join(", ")}\n${o.type === "here" ? "В кофейне" : "К выдаче"} · ${o.branch}\n${money(o.total)}`,
                       )
                       .join("\n\n")
                   : "Заказов пока нет",
@@ -1046,6 +1134,17 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
   if (url.pathname === "/api/menu") return json(res, 200, catalogue);
+  if (url.pathname === "/api/coins" && req.method === "GET") {
+    const phone = String(url.searchParams.get("phone") || "").replace(/\D/g, "");
+    const uid = String(url.searchParams.get("uid") || "").replace(/\D/g, "");
+    const key = phone ? "phone:" + phone : uid ? "tg:" + uid : "";
+    if (!key) return json(res, 200, { coins: 0, pending: 0 });
+    const entry = readCoins()[key] || { coins: 0 };
+    const pending = read()
+      .filter((o) => !o.credited && coinsKey(o.customer) === key)
+      .reduce((s, o) => s + plannedCoins(o.total), 0);
+    return json(res, 200, { coins: entry.coins || 0, pending });
+  }
   if (url.pathname === "/api/health")
     return json(res, 200, { ok: true, payments: "stub" });
   if (url.pathname === "/api/client-error" && req.method === "POST") {
@@ -1120,14 +1219,25 @@ const server = http.createServer(async (req, res) => {
         },
         items,
         total,
-        coinsEarned: Math.floor(total * 0.05),
+        coinsEarned: plannedCoins(total),
+        credited: false,
       };
       orders.push(order);
       fs.writeFileSync(file, JSON.stringify(orders, null, 2));
       for (const id of admins)
         telegram("sendMessage", {
           chat_id: id,
-          text: `☕ НОВЫЙ ЗАКАЗ #${order.id}\n${order.type === "here" ? "📍 В кофейне" : "🛍 С собой"} · ${order.branch}\n👤 ${order.customer.name} · ${order.customer.phone}\n\n${items.map((i) => `${lineTitle(i)} × ${i.qty} — ${money(i.price * i.qty)}`).join("\n")}\n\nИтого: ${money(total)}\nНачислить БК-Коинов: ${order.coinsEarned}`,
+          text: `☕ НОВЫЙ ЗАКАЗ #${order.id}\n${order.type === "here" ? "📍 В кофейне" : "🛍 С собой"} · ${order.branch}\n👤 ${order.customer.name} · ${order.customer.phone}\n\n${items.map((i) => `${lineTitle(i)} × ${i.qty} — ${money(i.price * i.qty)}`).join("\n")}\n\nИтого: ${money(total)}\nБК-Коинов после оплаты: ${order.coinsEarned}`,
+          reply_markup: JSON.stringify({
+            inline_keyboard: [
+              [
+                {
+                  text: `💳 Оплачен — начислить ${order.coinsEarned} коинов`,
+                  callback_data: "paid:" + order.id,
+                },
+              ],
+            ],
+          }),
         });
       return json(res, 201, {
         ok: true,
