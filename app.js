@@ -1,7 +1,36 @@
 const $ = (s) => document.querySelector(s);
+// Inside Telegram the SDK is present, but window.Telegram.WebApp also exists
+// in a regular browser — only initData tells that we really run in the client.
 const tg = window.Telegram?.WebApp;
-tg?.ready();
-tg?.expand();
+const inTelegram = !!tg?.initData;
+// Each Telegram call is guarded: an old client must not take the app down.
+const tgCall = (fn) => {
+  try {
+    fn();
+  } catch (err) {
+    console.warn("Telegram:", err);
+  }
+};
+if (tg) {
+  tgCall(() => tg.ready());
+  tgCall(() => tg.expand());
+  // Bot API 7.7+: otherwise a downward swipe while scrolling the sandwich
+  // builder or the cart collapses the whole Mini App instead of the sheet.
+  if (tg.isVersionAtLeast?.("7.7"))
+    tgCall(() => tg.disableVerticalSwipes());
+}
+// The Telegram WebView may be taller than the part the user actually sees
+// (the Mini App is not fully expanded), so 100vh/100dvh would put the bottom
+// sheet and its buttons off screen. Telegram reports the visible height.
+function syncViewport() {
+  const h = inTelegram && Number(tg.viewportStableHeight);
+  if (h > 0)
+    document.documentElement.style.setProperty("--app-height", h + "px");
+}
+if (inTelegram) {
+  syncViewport();
+  tgCall(() => tg.onEvent("viewportChanged", syncViewport));
+}
 // Storage may be unavailable: private mode, blocked cookies or the Telegram
 // WebView can throw on read and on write. The app must keep working anyway —
 // a failed save never blocks adding to the cart.
@@ -44,9 +73,12 @@ let page = "home",
   returnFocus;
 const tgUser = tg?.initDataUnsafe?.user;
 if (tgUser) {
-  profile.name ||= [tgUser.first_name, tgUser.last_name]
-    .filter(Boolean)
-    .join(" ");
+  // Plain assignment, not logical assignment: it breaks the whole script in
+  // older Telegram WebViews (iOS < 14, Android WebView < 85).
+  if (!profile.name)
+    profile.name = [tgUser.first_name, tgUser.last_name]
+      .filter(Boolean)
+      .join(" ");
   profile.telegramId = String(tgUser.id);
 }
 const money = (n) => new Intl.NumberFormat("ru-RU").format(n) + " ₽";
@@ -307,7 +339,7 @@ function addLine(line) {
   if (!cart[key].extras?.length) delete cart[key].extras;
   if (!cart[key].bread) delete cart[key].bread;
   persist();
-  tg?.HapticFeedback?.impactOccurred("light");
+  if (inTelegram) tgCall(() => tg.HapticFeedback?.impactOccurred("light"));
   toast("Добавлено в корзину");
   return true;
 }
@@ -328,7 +360,12 @@ function openSheet(html, dark = false) {
   $("#overlay").hidden = false;
   document.body.style.overflow = "hidden";
   $("#sheet").scrollTop = 0;
-  $("#sheet").focus();
+  // preventScroll: on phones focusing the sheet must not jump the page.
+  try {
+    $("#sheet").focus({ preventScroll: true });
+  } catch {
+    $("#sheet").focus();
+  }
 }
 function closeSheet() {
   if (submitting) return;
@@ -584,7 +621,7 @@ document.addEventListener("keydown", (e) => {
       ),
     ];
     const first = focusables[0],
-      last = focusables.at(-1);
+      last = focusables[focusables.length - 1];
     if (!first) {
       e.preventDefault();
       return;
@@ -605,7 +642,8 @@ document.addEventListener("keydown", (e) => {
 window.addEventListener("hashchange", () => {
   if (!submitting) closeSheet();
   render();
-  window.scrollTo({ top: 0, behavior: "instant" });
+  // Plain form: older WebViews throw on the "instant" scroll behavior.
+  window.scrollTo(0, 0);
 });
 async function loadMenu() {
   loading = true;

@@ -1130,6 +1130,28 @@ const server = http.createServer(async (req, res) => {
   try {
     const stat = fs.statSync(target);
     if (!stat.isFile()) throw new Error("Not a file");
+    if (pathname === "/index.html") {
+      // Telegram's WebView keeps old app.js/style.css much longer than a
+      // browser does, so after an update the Mini App kept running the old
+      // cart code. A content hash in the URL forces a fresh copy every time.
+      const html = fs
+        .readFileSync(target, "utf8")
+        .replace(/(src|href)="(app\.js|style\.css)"/g, (m, attr, name) => {
+          const hash = crypto
+            .createHash("sha1")
+            .update(fs.readFileSync(path.join(root, name)))
+            .digest("hex")
+            .slice(0, 10);
+          return `${attr}="${name}?v=${hash}"`;
+        });
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": Buffer.byteLength(html),
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      });
+      return res.end(req.method === "HEAD" ? undefined : html);
+    }
     const contentType =
       {
         ".html": "text/html; charset=utf-8",

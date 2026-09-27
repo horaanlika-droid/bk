@@ -41,6 +41,15 @@
   --soft: #f6f6f4;
   --radius: 20px;
   --width: 1120px;
+  /* Height of the visible area. 100vh is the fallback for older WebViews
+     (Telegram on iOS < 15.4, old Android System WebView) without dvh support;
+     inside Telegram app.js replaces it with viewportStableHeight. */
+  --app-height: 100vh;
+}
+@supports (height: 100dvh) {
+  :root {
+    --app-height: 100dvh;
+  }
 }
 * {
   box-sizing: border-box;
@@ -1098,7 +1107,12 @@ main {
 }
 .overlay {
   position: fixed;
-  inset: 0;
+  /* Explicit sides instead of inset alone: inset is missing in older WebViews. */
+  top: 0;
+  right: 0;
+  left: 0;
+  inset: 0 0 auto;
+  height: var(--app-height);
   background: #0007;
   backdrop-filter: blur(5px);
   z-index: 60;
@@ -1110,7 +1124,7 @@ main {
 .sheet {
   background: #fff;
   border-radius: 24px;
-  max-height: 90dvh;
+  max-height: calc(var(--app-height) * 0.9);
   width: 100%;
   max-width: 490px;
   padding: 25px;
@@ -2108,7 +2122,7 @@ select {
     padding: 0;
   }
   .sheet {
-    max-height: 92dvh;
+    max-height: calc(var(--app-height) * 0.92);
     border-radius: 23px 23px 0 0;
     padding: 24px 21px calc(24px + env(safe-area-inset-bottom));
     max-width: 600px;
