@@ -64,39 +64,40 @@ function hydrateIcons() {
     el.innerHTML = icon(el.dataset.icon);
   });
 }
-const photos = {
-  latte: "latte",
-  cappuccino: "cappuccino",
-  raf: "raf",
-  "ice-latte": "ice-latte",
-  lemonade: "lemonade",
+// Drinks use temporary hand-drawn cups with the brand mark (assets/drinks,
+// built by scripts/build_drinks.py) until professional photos are ready.
+// Food is intentionally shown without pictures for now.
+const hasArt = (p) => p.category !== "Еда";
+const isSandwich = (p) => Array.isArray(p.breads) && p.breads.length > 0;
+const hasBreadChoice = (p) => isSandwich(p) && p.breads.length > 1;
+const breadPaths = {
+  лепешка:
+    '<path d="M3 18a9 9 0 0 1 18 0Z"/><path d="M6.2 11.6c1-.9 2 .9 3 0s2 .9 3 0 2 .9 3 0 1.6.6 2.6.2"/><path d="M9 15h1.5m3 0H15"/>',
+  хлеб: '<path d="M12 4 3 19h18Z"/><path d="M12 9.2 7.2 17h9.6Z"/>',
+  булочка:
+    '<path d="M4 10.5a8 6 0 0 1 16 0Z"/><path d="M3 13.5h18"/><path d="M4 16.5h16a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3Z"/><path d="M10 7.5h.01M13 6.8h.01"/>',
 };
+const breadShort = { лепешка: "Лепёшка", хлеб: "Хлеб", булочка: "Булочка" };
+const breadIcon = (id) =>
+  `<svg class="bread-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${breadPaths[id] || breadPaths.хлеб}</svg>`;
 function productArt(p) {
-  // The catalogue returned by the server carries the source menu image. Use it
-  // here instead of silently replacing it with an illustration; this keeps the
-  // menu data and the product cards in sync when the catalogue is updated.
-  if (p.image)
-    return `<img src="/${encodeURIComponent(p.image)}" alt="${safe(p.name)}" loading="lazy">`;
-  if (photos[p.id])
-    return `<img src="assets/${photos[p.id]}.webp" alt="${safe(p.name)}" loading="lazy">`;
-  // Illustrations, not unrelated product photographs, for the remaining items.
-  const dessert = p.category === "Десерты";
-  let drawing;
-  if (p.id === "croissant") {
-    drawing =
-      '<ellipse cx="50" cy="77" rx="36" ry="6" fill="#ffffff15"/><path d="M12 66C9 42 26 22 50 24c24-2 41 18 38 42L71 57Q50 39 29 57Z" fill="#d99b4c"/><path d="m24 35 13 21m1-30 7 24m17-24-7 24m21-15-13 21" stroke="#f8d594" stroke-width="5"/><path d="m12 66 17-9-6 14zm76 0-17-9 6 14z" fill="#b47530"/>';
-  } else if (dessert) {
-    drawing =
-      '<path d="m18 62 60-29 7 38-62 12z" fill="#e4bf7d"/><path d="m18 57 60-29 7 32-62 12z" fill="#f5e7c9"/><path d="m18 57 60-29-22-8-38 29z" fill="#fff5dc"/><circle cx="56" cy="32" r="6" fill="#a44932"/>';
-  } else {
-    const drinkColor =
-      p.id === "matcha" ? "#809b4a" : p.id === "tea" ? "#9a443c" : "#58341e";
-    drawing = `<ellipse cx="48" cy="79" rx="32" ry="6" fill="#ffffff15"/><path d="M68 38h8c17 0 15 24-2 24h-6" fill="none" stroke="#cfbca4" stroke-width="6"/><path d="M22 32h49l-4 36q-20 21-41 0z" fill="#e7ddce"/><ellipse cx="46.5" cy="32" rx="24.5" ry="8" fill="#f5e9d5"/><ellipse cx="46.5" cy="32" rx="20" ry="5" fill="${drinkColor}"/><path d="M40 13q-5 5 0 10m12-14q-5 5 0 10" stroke="#ffffff55" stroke-width="2" fill="none"/>`;
-  }
-  return `<div class="product-placeholder ${dessert ? "dessert" : ""}" role="img" aria-label="${safe(p.name)} — иллюстрация"><svg viewBox="0 0 100 100" aria-hidden="true">${drawing}</svg></div>`;
+  if (p.art)
+    return `<img class="drink-art" src="assets/drinks/${encodeURIComponent(p.art)}.webp" alt="${safe(p.name)} — рисунок" loading="lazy">`;
+  return `<div class="product-placeholder" role="img" aria-label="${safe(p.name)}"><img src="assets/logo.png" alt=""></div>`;
+}
+function breadTags(p) {
+  if (!isSandwich(p)) return "";
+  if (!hasBreadChoice(p))
+    return `<div class="bread-tags single">${breadIcon(p.breads[0].id)}<span>Только ${safe(p.breads[0].name.toLowerCase())}</span></div>`;
+  return `<div class="bread-tags" aria-label="На выбор: ${p.breads.map((b) => safe(b.name.toLowerCase())).join(", ")}">${p.breads.map((b) => `<span>${breadIcon(b.id)}${breadShort[b.id] || safe(b.name)}</span>`).join("")}</div>`;
+}
+function foodCard(p) {
+  const action = isSandwich(p) ? "Собрать" : "Добавить";
+  return `<article class="product compact food-card"><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}</button>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}${breadTags(p)}<div class="product-bottom"><strong>${money(p.price)}</strong><button class="add-button" data-add="${p.id}" aria-label="${action}: ${safe(p.name)}">${icon("plus")}</button></div></div></article>`;
 }
 function productCard(p, compact = false) {
-  return `<article class="product ${compact ? "compact" : ""}"><button class="product-image" data-detail="${p.id}" aria-label="Подробнее: ${safe(p.name)}">${productArt(p)}${p.id === "latte" ? '<span class="hit">ХИТ</span>' : ""}</button><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}</button><p>${safe(p.desc)}</p><div class="product-bottom"><strong>${money(p.price)}</strong><button class="add-button" data-add="${p.id}" aria-label="Добавить ${safe(p.name)}">${icon("plus")}</button></div></div></article>`;
+  if (!hasArt(p)) return foodCard(p);
+  return `<article class="product ${compact ? "compact" : ""}"><button class="product-image ${p.art ? "art-tile" : ""}" data-detail="${p.id}" aria-label="Подробнее: ${safe(p.name)}">${productArt(p)}${p.id === "большой-латте" ? '<span class="hit">ХИТ</span>' : ""}</button><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}</button><p>${safe(p.desc)}</p><div class="product-bottom"><strong>${money(p.price)}</strong><button class="add-button" data-add="${p.id}" aria-label="Добавить ${safe(p.name)}">${icon("plus")}</button></div></div></article>`;
 }
 function statusMarkup() {
   return loading
@@ -106,7 +107,7 @@ function statusMarkup() {
       : "";
 }
 function homePage() {
-  const popular = ["latte", "cappuccino", "raf", "ice-latte"]
+  const popular = ["большой-латте", "cappuccino", "большой-раф", "ice-latte"]
     .map((id) => menu.find((p) => p.id === id))
     .filter(Boolean);
   return `<section class="welcome"><div><span class="eyebrow">ТВОЯ ЕЖЕДНЕВНАЯ ПАУЗА</span><h1>Как насчёт кофе?</h1></div><span class="welcome-note">Знакомый вкус.<br>Всегда рядом.</span></section>
@@ -128,13 +129,37 @@ function menuResults() {
   );
   if (!list.length)
     return '<div class="empty">Ничего не нашли. Попробуй другой запрос или категорию.</div>';
+  const grid = (items) =>
+    `<div class="menu-grid">${items.map((p) => productCard(p, true)).join("")}</div>`;
   return cats
     .slice(1)
     .map((c) => {
       const group = list.filter((p) => p.category === c);
-      return group.length
-        ? `<section class="menu-group"><h2>${c}</h2><div class="menu-grid">${group.map((p) => productCard(p, true)).join("")}</div></section>`
-        : "";
+      if (!group.length) return "";
+      if (c !== "Еда")
+        return `<section class="menu-group"><h2>${c}</h2>${grid(group)}</section>`;
+      // Food follows the paper menu: sandwiches with a bread choice, the ones
+      // made only in flatbread, then nuggets and sauces.
+      const parts = [
+        {
+          title: "Сэндвичи на твой выбор",
+          note: "Готовим в лепёшке, хлебе или булочке — выберешь при добавлении",
+          items: group.filter(hasBreadChoice),
+        },
+        {
+          title: "Готовятся в лепёшке",
+          items: group.filter((p) => isSandwich(p) && !hasBreadChoice(p)),
+        },
+        { title: "Наггетсы", items: group.filter((p) => p.group === "Наггетсы") },
+        { title: "Соусы", items: group.filter((p) => p.group === "Соусы") },
+      ];
+      return `<section class="menu-group food-group"><h2>${c}</h2>${parts
+        .filter((part) => part.items.length)
+        .map(
+          (part) =>
+            `<div class="food-part"><h3>${part.title}</h3>${part.note ? `<p class="food-note">${part.note}</p>` : ""}${grid(part.items)}</div>`,
+        )
+        .join("")}</section>`;
     })
     .join("");
 }
@@ -187,12 +212,49 @@ function toast(text) {
   $("#announcements").append(el);
   setTimeout(() => el.remove(), 3000);
 }
+// Cart lines are keyed by product + chosen bread + extras, so the same sandwich
+// in different breads stays as separate lines: { [key]: { id, qty, bread?, extras? } }.
+const lineKey = (id, bread = "", extras = []) =>
+  [id, bread || "", [...extras].sort().join("+")].join("|");
+function lineInfo(line) {
+  const p = menu.find((x) => x.id === line.id);
+  if (!p) return null;
+  const extras = (line.extras || [])
+    .map((id) => (p.extras || []).find((e) => e.id === id))
+    .filter(Boolean);
+  const bread = isSandwich(p)
+    ? p.breads.find((b) => b.id === line.bread) || (!hasBreadChoice(p) && p.breads[0])
+    : null;
+  return {
+    p,
+    bread,
+    extras,
+    price: p.price + extras.reduce((sum, e) => sum + e.price, 0),
+  };
+}
+// Keeps only valid lines; also converts the old { id: qty } cart format.
+function cleanCart(raw) {
+  const next = {};
+  for (const [key, value] of Object.entries(raw || {})) {
+    const line = typeof value === "number" ? { id: key, qty: value } : value;
+    if (!line || !Number.isInteger(line.qty) || line.qty <= 0) continue;
+    const info = lineInfo(line);
+    if (!info || (isSandwich(info.p) && !info.bread)) continue;
+    const clean = { id: info.p.id, qty: Math.min(20, line.qty) };
+    if (info.bread) clean.bread = info.bread.id;
+    if (info.extras.length) clean.extras = info.extras.map((e) => e.id);
+    next[lineKey(clean.id, clean.bread, clean.extras)] = clean;
+  }
+  return next;
+}
 function totals() {
-  return menu.reduce(
-    (s, p) => ({
-      qty: s.qty + (cart[p.id] || 0),
-      total: s.total + p.price * (cart[p.id] || 0),
-    }),
+  return Object.values(cart).reduce(
+    (s, line) => {
+      const info = lineInfo(line);
+      return info
+        ? { qty: s.qty + line.qty, total: s.total + info.price * line.qty }
+        : s;
+    },
     { qty: 0, total: 0 },
   );
 }
@@ -209,16 +271,27 @@ function drawCart() {
   $("#floatTotal").textContent = money(total);
   document.body.classList.toggle("has-cart", !!qty);
 }
-function addProduct(id, qty = 1) {
-  if (!menu.some((p) => p.id === id)) return;
-  if ((cart[id] || 0) >= 20) {
+function addLine(line) {
+  const key = lineKey(line.id, line.bread, line.extras);
+  const current = cart[key]?.qty || 0;
+  if (current >= 20) {
     toast("Можно добавить не больше 20 порций");
-    return;
+    return false;
   }
-  cart[id] = Math.min(20, (cart[id] || 0) + qty);
+  cart[key] = { ...line, qty: current + 1 };
+  if (!cart[key].extras?.length) delete cart[key].extras;
+  if (!cart[key].bread) delete cart[key].bread;
   persist();
   tg?.HapticFeedback?.impactOccurred("light");
   toast("Добавлено в корзину");
+  return true;
+}
+function addProduct(id) {
+  const p = menu.find((x) => x.id === id);
+  if (!p) return;
+  // Sandwiches go through the builder: bread first, then optional extras.
+  if (isSandwich(p)) return openBuilder(id);
+  addLine({ id });
 }
 function head(title) {
   return `<div class="sheet-head"><h2 id="sheetTitle">${title}</h2><button class="icon-button" data-action="close" aria-label="Закрыть">${icon("close")}</button></div>`;
@@ -241,15 +314,89 @@ function closeSheet() {
 function productDetail(id) {
   const p = menu.find((x) => x.id === id);
   if (!p) return;
+  if (isSandwich(p)) return openBuilder(id);
+  const art = hasArt(p) ? `<div class="detail-image art-tile">${productArt(p)}</div>` : "";
+  const note = hasArt(p)
+    ? "Рисунок временный — фото напитка появится позже. Уточнить состав можно у бариста."
+    : "Уточнить состав можно у бариста.";
   openSheet(
-    `${head(safe(p.name))}<div class="detail-image">${productArt(p)}</div><div class="detail-description"><h3>${safe(p.name)} <span>${money(p.price)}</span></h3><p>${safe(p.desc)}</p><p class="fine">Базовая порция из меню. Уточнить состав можно у бариста.</p></div><button class="primary full" data-detail-add="${p.id}">Добавить в корзину · ${money(p.price)} ${icon("plus")}</button>`,
+    `${head(safe(p.name))}${art}<div class="detail-description"><h3>${safe(p.name)} <span>${money(p.price)}</span></h3>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}<p class="fine">${note}</p></div><button class="primary full" data-detail-add="${p.id}">Добавить в корзину · ${money(p.price)} ${icon("plus")}</button>`,
   );
 }
+let builder = null;
+function openBuilder(id) {
+  const p = menu.find((x) => x.id === id);
+  if (!p || !isSandwich(p)) return;
+  const choice = hasBreadChoice(p);
+  builder = { id, bread: choice ? "" : p.breads[0].id, extras: new Set() };
+  const extras = p.extras || [];
+  const groups = [...new Set(extras.map((e) => e.group))];
+  openSheet(
+    `${head(safe(p.name))}<form id="builderForm" class="builder" novalidate><p class="builder-desc">${safe(p.desc)}</p>
+    <fieldset class="builder-step" id="breadStep"><legend><span class="step-num">1</span><span>В чём приготовить?</span>${choice ? '<small class="required-tag">обязательно</small>' : ""}</legend>
+    <div class="bread-options ${choice ? "" : "single"}">${p.breads.map((b) => `<label class="bread-option"><input type="radio" name="bread" value="${b.id}" ${choice ? "" : "checked"}><span class="option-card">${breadIcon(b.id)}<span>${safe(b.name)}</span><i class="option-check">${icon("check")}</i></span></label>`).join("")}</div>
+    ${choice ? "" : '<p class="fine">Эта позиция готовится только в лепёшке.</p>'}</fieldset>
+    ${groups
+      .map(
+        (g, i) =>
+          `<fieldset class="builder-step"><legend><span class="step-num">${i + 2}</span><span>${g === "Соус" ? "Добавить соус" : "Добавки"}</span><small>по желанию</small></legend><div class="extra-options">${extras
+            .filter((e) => e.group === g)
+            .map(
+              (e) =>
+                `<label class="extra-option"><input type="checkbox" name="extra" value="${e.id}"><span class="option-row"><span class="check-box">${icon("check")}</span><span class="extra-name">${safe(e.name)}</span><b>+${money(e.price)}</b></span></label>`,
+            )
+            .join("")}</div></fieldset>`,
+      )
+      .join("")}
+    <div class="builder-summary" id="builderSummary" aria-live="polite"></div>
+    <button class="primary full" id="builderSubmit" type="submit"></button></form>`,
+  );
+  const form = $("#builderForm");
+  const update = () => {
+    builder.bread = form.querySelector('input[name="bread"]:checked')?.value || "";
+    builder.extras = new Set(
+      [...form.querySelectorAll('input[name="extra"]:checked')].map((x) => x.value),
+    );
+    const info = lineInfo({ id, bread: builder.bread, extras: [...builder.extras] });
+    const parts = [
+      info.bread ? info.bread.name : "Хлеб не выбран",
+      ...info.extras.map((e) => e.name.toLowerCase()),
+    ];
+    $("#builderSummary").textContent = parts.join(" · ");
+    $("#builderSubmit").innerHTML = info.bread
+      ? `Добавить · ${money(info.price)} ${icon("plus")}`
+      : `Выбери, в чём приготовить`;
+    $("#builderSubmit").classList.toggle("waiting", !info.bread);
+    $("#breadStep").classList.remove("invalid");
+  };
+  form.addEventListener("change", update);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!builder.bread) {
+      $("#breadStep").classList.add("invalid");
+      form.querySelector('input[name="bread"]')?.focus();
+      toast("Выбери лепёшку, хлеб или булочку");
+      return;
+    }
+    if (addLine({ id, bread: builder.bread, extras: [...builder.extras] }))
+      closeSheet();
+  });
+  update();
+}
+function lineOptions(info) {
+  const parts = [];
+  if (info.bread) parts.push(info.bread.name);
+  if (info.extras.length)
+    parts.push("+ " + info.extras.map((e) => e.name.toLowerCase()).join(", "));
+  return parts.join(" · ");
+}
 function openCart() {
-  const items = menu.filter((p) => cart[p.id]),
+  const items = Object.entries(cart)
+      .map(([key, line]) => ({ key, line, info: lineInfo(line) }))
+      .filter((x) => x.info),
     { total } = totals();
   openSheet(
-    `${head("Корзина")}${items.length ? `<div class="cart-list">${items.map((p) => `<div class="cart-row"><div class="cart-image">${productArt(p)}</div><div class="cart-item-info"><b>${safe(p.name)}</b><small>${money(p.price)} / шт.</small><div class="qty"><button data-dec="${p.id}" aria-label="Убрать один ${safe(p.name)}">−</button><span>${cart[p.id]}</span><button data-inc="${p.id}" aria-label="Добавить один ${safe(p.name)}" ${cart[p.id] >= 20 ? "disabled" : ""}>+</button></div></div><strong>${money(p.price * cart[p.id])}</strong></div>`).join("")}</div><div class="cart-coins">${coin()}<span>Начислим за этот заказ</span><b>+${Math.floor(total * 0.05)} коинов</b></div><div class="total-row"><span>Итого</span><strong>${money(total)}</strong></div><form id="checkoutForm"><div class="choice-row"><button type="button" class="choice ${type === "pickup" ? "selected" : ""}" data-type="pickup">${icon("bag")}С собой</button><button type="button" class="choice ${type === "here" ? "selected" : ""}" data-type="here">${icon("chair")}В кофейне</button></div><label class="form-label" for="branch">Город</label><select id="branch"><option ${branch === "Волжский" ? "selected" : ""}>Волжский</option><option ${branch === "Волгоград" ? "selected" : ""}>Волгоград</option></select><label class="form-label" for="customerName">Твоё имя</label><input id="customerName" autocomplete="name" placeholder="Имя" maxlength="80" required value="${safe(profile.name || "")}"><label class="form-label" for="customerPhone">Телефон для заказа</label><input id="customerPhone" type="tel" autocomplete="tel" placeholder="+7 900 000-00-00" maxlength="30" required value="${safe(profile.phone || "")}"><p class="fine">Оплата при получении. Выбор конкретной точки пока недоступен — кофейня уточнит место выдачи по телефону.</p><button class="primary full" id="submitOrder">Оформить заказ · ${money(total)} ${icon("arrow")}</button></form>` : `<div class="empty">${icon("bag")}<h3>Здесь будет твой кофе</h3><p>Добавь что-нибудь вкусное из меню.</p><button class="primary" data-action="toMenu">Выбрать напиток ${icon("arrow")}</button></div>`}`,
+    `${head("Корзина")}${items.length ? `<div class="cart-list">${items.map(({ key, line, info }) => { const p = info.p, k = safe(key), options = lineOptions(info); return `<div class="cart-row"><div class="cart-image ${hasArt(p) ? "art-tile" : "food-thumb"}">${hasArt(p) ? productArt(p) : breadIcon(info.bread?.id || "булочка")}</div><div class="cart-item-info"><b>${safe(p.name)}</b>${options ? `<small class="line-options">${safe(options)}</small>` : ""}<small>${money(info.price)} / шт.</small><div class="qty"><button data-dec="${k}" aria-label="Убрать один ${safe(p.name)}">−</button><span>${line.qty}</span><button data-inc="${k}" aria-label="Добавить один ${safe(p.name)}" ${line.qty >= 20 ? "disabled" : ""}>+</button></div></div><strong>${money(info.price * line.qty)}</strong></div>`; }).join("")}</div><div class="cart-coins">${coin()}<span>Начислим за этот заказ</span><b>+${Math.floor(total * 0.05)} коинов</b></div><div class="total-row"><span>Итого</span><strong>${money(total)}</strong></div><form id="checkoutForm"><div class="choice-row"><button type="button" class="choice ${type === "pickup" ? "selected" : ""}" data-type="pickup">${icon("bag")}С собой</button><button type="button" class="choice ${type === "here" ? "selected" : ""}" data-type="here">${icon("chair")}В кофейне</button></div><label class="form-label" for="branch">Город</label><select id="branch"><option ${branch === "Волжский" ? "selected" : ""}>Волжский</option><option ${branch === "Волгоград" ? "selected" : ""}>Волгоград</option></select><label class="form-label" for="customerName">Твоё имя</label><input id="customerName" autocomplete="name" placeholder="Имя" maxlength="80" required value="${safe(profile.name || "")}"><label class="form-label" for="customerPhone">Телефон для заказа</label><input id="customerPhone" type="tel" autocomplete="tel" placeholder="+7 900 000-00-00" maxlength="30" required value="${safe(profile.phone || "")}"><p class="fine">Оплата при получении. Выбор конкретной точки пока недоступен — кофейня уточнит место выдачи по телефону.</p><button class="primary full" id="submitOrder">Оформить заказ · ${money(total)} ${icon("arrow")}</button></form>` : `<div class="empty">${icon("bag")}<h3>Здесь будет твой кофе</h3><p>Добавь что-нибудь вкусное из меню.</p><button class="primary" data-action="toMenu">Выбрать напиток ${icon("arrow")}</button></div>`}`,
   );
   $("#checkoutForm")?.addEventListener("submit", submitOrder);
 }
@@ -282,9 +429,12 @@ async function submitOrder(e) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        items: menu
-          .filter((p) => cart[p.id])
-          .map((p) => ({ id: p.id, qty: cart[p.id] })),
+        items: Object.values(cart).map((line) => ({
+          id: line.id,
+          qty: line.qty,
+          bread: line.bread,
+          extras: line.extras,
+        })),
         customer: profile,
         branch,
         type,
@@ -341,9 +491,11 @@ document.addEventListener("click", (e) => {
   }
   if (b.dataset.inc || b.dataset.dec) {
     saveCheckoutDraft();
-    const id = b.dataset.inc || b.dataset.dec;
-    cart[id] = Math.min(20, (cart[id] || 0) + (b.dataset.inc ? 1 : -1));
-    if (cart[id] <= 0) delete cart[id];
+    const key = b.dataset.inc || b.dataset.dec;
+    if (cart[key]) {
+      cart[key].qty = Math.min(20, cart[key].qty + (b.dataset.inc ? 1 : -1));
+      if (cart[key].qty <= 0) delete cart[key];
+    }
     persist();
     openCart();
   }
@@ -419,14 +571,7 @@ async function loadMenu() {
     const data = await response.json();
     if (!Array.isArray(data)) throw new Error();
     menu = data;
-    cart = Object.fromEntries(
-      Object.entries(cart)
-        .filter(
-          ([id, qty]) =>
-            menu.some((p) => p.id === id) && Number.isInteger(qty) && qty > 0,
-        )
-        .map(([id, qty]) => [id, Math.min(20, qty)]),
-    );
+    cart = cleanCart(cart);
     persist();
   } catch {
     loadError = true;
