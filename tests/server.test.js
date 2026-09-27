@@ -58,13 +58,20 @@ after(async () => {
 
 test("menu and public assets load with correct MIME types", async () => {
   const menu = await (await fetch(base + "/api/menu")).json();
-  assert.equal(menu.length, 102);
+  assert.equal(menu.length, 97);
+  assert.equal(new Set(menu.map((item) => item.id)).size, menu.length);
+  for (const item of menu.filter((p) => p.category !== "Еда"))
+    assert.ok(item.art, "drink has an illustration: " + item.id);
   assert.equal(menu.find((item) => item.id === "большой-латте").price, 200);
   for (const [url, type] of [
     ["/", "text/html"],
     ["/app.js", "text/javascript"],
     ["/style.css", "text/css"],
     ["/assets/logo.png", "image/png"],
+    ...[...new Set(menu.filter((p) => p.art).map((p) => p.art))].map((art) => [
+      `/assets/drinks/${encodeURIComponent(art)}.webp`,
+      "image/webp",
+    ]),
     ["/assets/fonts/manrope-cyrillic-wght-normal.woff2", "font/woff2"],
   ]) {
     const response = await fetch(base + url);
@@ -124,4 +131,47 @@ test("empty or invalid checkout is rejected", async () => {
       400,
     );
   }
+});
+
+test("sandwich builder: bread is required, extras are priced on the server", async () => {
+  const menu = await (await fetch(base + "/api/menu")).json();
+  const caesar = menu.find((item) => item.id === "цезарь");
+  assert.deepEqual(
+    caesar.breads.map((b) => b.id),
+    ["лепешка", "хлеб", "булочка"],
+  );
+  assert.equal(menu.find((item) => item.id === "клаб").breads.length, 1);
+  assert.ok(!menu.some((item) => item.id === "мясо"), "add-ons live in the builder");
+  const order = (items) =>
+    fetch(base + "/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items,
+        type: "pickup",
+        branch: "Волжский",
+        customer: { name: "Тест", phone: "+7 900 000-00-00" },
+      }),
+    });
+  const missing = await order([{ id: "цезарь", qty: 1 }]);
+  assert.equal(missing.status, 400);
+  assert.match((await missing.json()).error, /Цезарь/);
+  assert.equal(
+    (await order([{ id: "цезарь", qty: 1, bread: "багет" }])).status,
+    400,
+  );
+  const ok = await order([
+    { id: "цезарь", qty: 2, bread: "хлеб", extras: ["мясо", "мясо", "соус-гриль", "золото"] },
+    { id: "клаб", qty: 1 },
+  ]);
+  assert.equal(ok.status, 201);
+  // (250 + 70 + 40) × 2 + 285
+  assert.equal((await ok.json()).total, 1005);
+  const orders = JSON.parse(
+    await readFile(join(directory, "data/orders.json"), "utf8"),
+  );
+  const saved = orders.at(-1).items;
+  assert.equal(saved[0].bread, "В хлебе");
+  assert.deepEqual(saved[0].extras, ["Мясо", "Соус гриль"]);
+  assert.equal(saved[1].bread, "В лепёшке");
 });
