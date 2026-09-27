@@ -211,3 +211,41 @@ test("sheet actions are pinned to the bottom of the sheet", async () => {
   assert.match(app, /class="sheet-footer"><div class="builder-summary"/);
   assert.match(style, /\.sheet-footer \{[^}]*position: sticky/s);
 });
+
+test("index.html links versioned app.js/style.css so Telegram cannot reuse a stale copy", async () => {
+  const response = await fetch(base + "/");
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const html = await response.text();
+  const js = html.match(/src="app\.js\?v=([0-9a-f]{10})"/);
+  const css = html.match(/href="style\.css\?v=([0-9a-f]{10})"/);
+  assert.ok(js && css, "both files carry a content hash");
+  // The versioned URL is still served as the plain file.
+  const asset = await fetch(`${base}/app.js?v=${js[1]}`);
+  assert.equal(asset.status, 200);
+  assert.ok(asset.headers.get("content-type").startsWith("text/javascript"));
+});
+
+test("sheets fit the screen in older Telegram WebViews", async () => {
+  const app = await readFile(join(directory, "app.js"), "utf8");
+  const style = await readFile(join(directory, "style.css"), "utf8");
+  // Syntax that makes an older WebView reject the whole script, or throws there.
+  for (const [pattern, name] of [
+    [/\|\|=|&&=|\?\?=/, "logical assignment"],
+    [/\.at\(/, "Array.prototype.at"],
+    [/behavior:\s*"instant"/, 'scroll behavior "instant"'],
+  ])
+    assert.doesNotMatch(app, pattern, name);
+  // dvh only through the variable with a 100vh fallback; without it the sheet
+  // grew past the top of the screen and could not be scrolled or closed.
+  assert.match(style, /--app-height: 100vh;/);
+  assert.match(style, /@supports \(height: 100dvh\)/);
+  const withoutFallback = style
+    .replace(/--app-height: 100dvh;/g, "")
+    .replace(/@supports \(height: 100dvh\)/g, "");
+  assert.doesNotMatch(withoutFallback, /\d+dvh/);
+  assert.match(style, /\.sheet \{[^}]*max-height: calc\(var\(--app-height\)/s);
+  assert.match(style, /\.overlay \{[^}]*height: var\(--app-height\)/s);
+  // In Telegram the visible height comes from the client, swipes stay inside.
+  assert.match(app, /viewportStableHeight/);
+  assert.match(app, /disableVerticalSwipes/);
+});
