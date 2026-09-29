@@ -7,17 +7,19 @@ import { join } from "node:path";
 import net from "node:net";
 import http from "node:http";
 import { once } from "node:events";
-import { randomBytes, scryptSync } from "node:crypto";
+import { createHmac } from "node:crypto";
 
 let process, directory, base, fakeTelegram;
 const telegramCalls = [];
 const telegramCallListeners = new Set();
+// The admin menu is driven by button presses, so most of these updates are
+// callback queries against the menu message.
 const telegramUpdates = [
   {
     update_id: 1,
     message: {
       chat: { id: 222222, type: "private" },
-      from: { id: 222222 },
+      from: { id: 222222, first_name: "Гость" },
       text: "/start",
     },
   },
@@ -25,19 +27,53 @@ const telegramUpdates = [
     update_id: 2,
     message: {
       chat: { id: 123456789, type: "private" },
-      from: { id: 123456789, username: "boss" },
-      text: "/adduser botcook Иван Повар повар",
+      from: { id: 123456789, first_name: "Босс", username: "boss" },
+      text: "/start",
     },
   },
   {
     update_id: 3,
-    message: {
-      chat: { id: 123456789, type: "private" },
-      from: { id: 123456789, username: "boss" },
-      text: "/grant botcook админ",
+    callback_query: {
+      id: "cb-orders",
+      from: { id: 123456789, first_name: "Босс" },
+      data: "m:orders",
+      message: { chat: { id: 123456789 }, message_id: 11, text: "меню" },
+    },
+  },
+  {
+    update_id: 4,
+    callback_query: {
+      id: "cb-guest",
+      from: { id: 222222, first_name: "Гость" },
+      data: "m:main",
+      message: { chat: { id: 222222 }, message_id: 12, text: "меню" },
     },
   },
 ];
+let nextUpdateId = 100;
+// Tests push new updates while the bot is polling: the same long-poll loop
+// picks them up, exactly like a real person tapping.
+function pushUpdate(update) {
+  telegramUpdates.push({ update_id: nextUpdateId++, ...update });
+}
+// Telegram signs everything it hands to a Mini App; the test signs initData
+// with the same bot token, so the server can check it the way it checks a real
+// /staff page opened from the bot.
+function makeInitData(user) {
+  const params = new URLSearchParams();
+  params.set("auth_date", String(Math.floor(Date.now() / 1000)));
+  params.set("query_id", "AAHdF6IQAAAAAN0XohDhrOrc");
+  params.set("user", JSON.stringify(user));
+  const pairs = [...params.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => `${key}=${value}`);
+  const secret = createHmac("sha256", "WebAppData").update("test-token").digest();
+  params.set(
+    "hash",
+    createHmac("sha256", secret).update(pairs.join("\n")).digest("hex"),
+  );
+  return params.toString();
+}
 function waitForTelegramCall(predicate, timeout = 5000) {
   const found = telegramCalls.find(predicate);
   if (found) return Promise.resolve(found);
@@ -114,7 +150,6 @@ before(async () => {
       ADMIN_IDS: "123456789",
       APP_URL: "https://app.example.test/miniapp",
       TELEGRAM_API_URL: telegramApiUrl,
-      STAFF_PIN: "test-staff-pin",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -135,7 +170,7 @@ after(async () => {
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
-test("Telegram welcomes guests, configures the blue app button and grants roles to admins", async () => {
+test("Telegram welcomes guests and hands admins an inline menu", async () => {
   const welcome = await waitForTelegramCall(
     (call) => call.method === "sendMessage" && call.body.chat_id === 222222,
   );
@@ -149,23 +184,174 @@ test("Telegram welcomes guests, configures the blue app button and grants roles 
   );
   assert.equal(menuButton.body.menu_button.text, "Открыть приложение");
   assert.equal(menuButton.body.menu_button.web_app.url, "https://app.example.test/miniapp");
+  // The admin gets a menu of buttons instead of a list of commands to memorise.
+  const menu = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      String(call.body.text).includes("меню администратора"),
+  );
+  const buttons = menu.body.reply_markup.inline_keyboard.flat();
+  const labels = buttons.map((button) => button.text).join(" ");
+  for (const label of ["📋 Заказы", "💳 Оплатить", "🛑 Стоп-лист", "🏁 Гоу-лист", "👥 Админы", "➕ Добавить админа", "❓ Помощь"])
+    assert.ok(labels.includes(label), "the menu offers " + label);
+  // The team page opens straight from the chat, no password involved.
+  const staff = buttons.find((button) => button.web_app?.url);
+  assert.equal(staff.web_app.url, "https://app.example.test/staff");
+  const screens = buttons.map((button) => button.callback_data);
+  assert.ok(screens.includes("m:orders") && screens.includes("m:admins"));
+  // Tapping a button edits the same message instead of piling up new ones.
+  const orders = await waitForTelegramCall(
+    (call) => call.method === "editMessageText" && call.body.message_id === 11,
+  );
+  assert.match(orders.body.text, /Последние заказы|Заказов пока нет/);
+  assert.ok(
+    orders.body.reply_markup.inline_keyboard
+      .flat()
+      .some((button) => button.callback_data === "m:main"),
+    "every screen has a way back",
+  );
+  // A guest pressing the same buttons is refused.
+  const refused = await waitForTelegramCall(
+    (call) => call.method === "answerCallbackQuery" && call.body.callback_query_id === "cb-guest",
+  );
+  assert.match(refused.body.text, /только для администраторов/);
+});
+
+test("admins are added by id, by @nickname or from a reply — and get everything", async () => {
+  // A future admin writes to the bot once, so the bot knows both his id and
+  // his nickname; that is what makes «/addadmin @ivan» resolvable.
+  pushUpdate({
+    message: {
+      chat: { id: 555000111, type: "private" },
+      from: { id: 555000111, first_name: "Иван", username: "ivan" },
+      text: "/start",
+    },
+  });
+  await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 555000111 &&
+      /синюю кнопку/.test(String(call.body.text)),
+  );
+  // By nickname.
+  pushUpdate({
+    message: {
+      chat: { id: 123456789, type: "private" },
+      from: { id: 123456789, first_name: "Босс", username: "boss" },
+      text: "/addadmin @ivan",
+    },
+  });
   const added = await waitForTelegramCall(
     (call) =>
       call.method === "sendMessage" &&
       call.body.chat_id === 123456789 &&
-      String(call.body.text).includes("✅ Доступ выдан"),
+      String(call.body.text).includes("Админ добавлен"),
   );
-  assert.match(added.body.text, /Роль: повар/);
-  assert.match(added.body.text, /технологические карты/);
-  const granted = await waitForTelegramCall(
+  assert.match(added.body.text, /Иван @ivan · id 555000111/);
+  // He is told himself, and the menu opens for him right away.
+  const told = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 555000111 &&
+      String(call.body.text).includes("добавили администратором"),
+  );
+  assert.match(told.body.text, /\/menu/);
+  pushUpdate({
+    message: {
+      chat: { id: 555000111, type: "private" },
+      from: { id: 555000111, first_name: "Иван", username: "ivan" },
+      text: "/menu",
+    },
+  });
+  const hisMenu = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 555000111 &&
+      String(call.body.text).includes("меню администратора"),
+  );
+  assert.ok(
+    hisMenu.body.reply_markup.inline_keyboard
+      .flat()
+      .some((button) => button.callback_data === "m:admins"),
+    "a newly added admin gets the same menu",
+  );
+  // By id, even for somebody who never wrote to the bot.
+  pushUpdate({
+    message: {
+      chat: { id: 123456789, type: "private" },
+      from: { id: 123456789, first_name: "Босс", username: "boss" },
+      text: "/addadmin 555000222",
+    },
+  });
+  await waitForTelegramCall(
     (call) =>
       call.method === "sendMessage" &&
       call.body.chat_id === 123456789 &&
-      String(call.body.text).includes("✅ Права обновлены"),
+      /Админ добавлен[\s\S]*555000222/.test(String(call.body.text)),
   );
-  assert.match(granted.body.text, /Роль: админ/);
-  const stored = JSON.parse(await readFile(join(directory, "data/staff.json"), "utf8"));
-  assert.equal(stored.accounts.find((account) => account.login === "botcook").role, "админ");
+  // By answering somebody's message.
+  pushUpdate({
+    message: {
+      chat: { id: 123456789, type: "private" },
+      from: { id: 123456789, first_name: "Босс", username: "boss" },
+      text: "/addadmin",
+      reply_to_message: {
+        message_id: 7,
+        from: { id: 555000333, first_name: "Оля", username: "olya" },
+        text: "привет",
+      },
+    },
+  });
+  await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      /Админ добавлен[\s\S]*555000333/.test(String(call.body.text)),
+  );
+  // The main admin from ADMIN_IDS cannot be removed from the bot.
+  pushUpdate({
+    message: {
+      chat: { id: 123456789, type: "private" },
+      from: { id: 123456789, first_name: "Босс", username: "boss" },
+      text: "/deladmin 123456789",
+    },
+  });
+  const refused = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      /ADMIN_IDS/.test(String(call.body.text)),
+  );
+  assert.match(refused.body.text, /ADMIN_IDS/);
+  // Everybody else can.
+  pushUpdate({
+    message: {
+      chat: { id: 123456789, type: "private" },
+      from: { id: 123456789, first_name: "Босс", username: "boss" },
+      text: "/deladmin 555000222",
+    },
+  });
+  await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      String(call.body.text).includes("Админ удалён"),
+  );
+  const stored = JSON.parse(await readFile(join(directory, "data/admins.json"), "utf8"));
+  assert.deepEqual(
+    stored.admins.map((admin) => admin.id).sort(),
+    ["555000111", "555000333"],
+  );
+  assert.equal((await fetch(base + "/data/admins.json")).status, 404);
+  // Whoever wrote to the bot can be picked from the menu; the list stays on
+  // the server and is never served as a file.
+  const people = JSON.parse(await readFile(join(directory, "data/people.json"), "utf8"));
+  assert.ok(
+    people.people.some((p) => p.id === "555000111" && p.username === "ivan"),
+    "the bot remembers who wrote to it",
+  );
+  assert.equal((await fetch(base + "/data/people.json")).status, 404);
 });
 
 test("menu and public assets load with correct MIME types", async () => {
@@ -295,9 +481,10 @@ test("coins are credited only by the admin after payment", async () => {
   assert.equal(orders.at(-1).credited, false);
   // The bot is what credits: only an admin may press the payment button.
   const source = await readFile(join(directory, "server.js"), "utf8");
-  assert.match(source, /admins\.includes\(String\(q\.from\.id\)\)/);
+  assert.match(source, /if \(!isAdmin\(userId\)\)/);
   assert.match(source, /callback_data: "paid:" \+ order\.id/);
   assert.match(source, /Начислять коины может только администратор/);
+  assert.doesNotMatch(source, /\/api\/staff\/login/);
   assert.match(source, /function markPaid\(/);
   assert.doesNotMatch(
     source,
@@ -560,57 +747,108 @@ test("sheets follow the visible area and failures never dead-end", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Team tools: personal accounts issued by the admin in the bot, the stop list
-// that really removes an item from sale, the go list, the shift roster and
-// the question board.
-test("staff access is personal and issued by the admin in the bot", async () => {
+// Team tools: no logins and no passwords. An admin opens /staff from the bot,
+// Telegram signs who it is, and the admin gets every list and every card.
+const adminUser = { id: 123456789, first_name: "Босс", username: "boss" };
+test("the team page signs an admin in with Telegram — no passwords anywhere", async () => {
   const source = await readFile(join(directory, "server.js"), "utf8");
-  // Account management lives in the admin branch of the bot and lets the
-  // configured admins issue accounts and change their role-based powers.
-  assert.ok(source.includes("(team|adduser|newpass|deluser|setrole|grant|roles)"));
-  assert.match(source, /admins\.includes\(String\(m\.chat\.id\)\)/);
-  assert.match(source, /Полные команды бота доступны только ID из ADMIN_IDS/);
-  assert.match(source, /setChatMenuButton/);
-  assert.match(source, /web_app: \{ url: appUrl \}/);
-  assert.match(source, /Добро пожаловать в «Большой Кофе»/);
-  assert.match(source, /function orderPreparationMessages\(order\)/);
-  assert.match(source, /const preparation = orderPreparationMessages\(order\)/);
-  assert.match(source, /function createAccount\(/);
-  // Passwords are stored only as salted scrypt hashes.
-  assert.match(source, /crypto\.scryptSync/);
-  assert.doesNotMatch(source, /password: *String\(body\.password\)[^)]*writeStaff/);
-  // Wrong or missing credentials do not pass.
-  const bad = await fetch(base + "/api/staff/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ login: "admin", password: "wrong" }),
-  });
-  assert.equal(bad.status, 403);
+  assert.match(source, /function telegramUserFromInitData\(/);
+  assert.match(source, /web_app: \{ url: staffUrl \}/);
+  assert.doesNotMatch(source, /\/api\/staff\/login/);
+  assert.doesNotMatch(source, /scryptSync/);
+  assert.doesNotMatch(source, /STAFF_PIN/);
+  // Without a session nothing is readable and nothing is writable.
+  assert.equal((await fetch(base + "/api/staff/state")).status, 401);
   assert.equal(
-    (await fetch(base + "/api/staff/state")).status,
+    (
+      await staffPost("", "/api/staff/stop", {
+        name: "Без входа",
+        station: "Кухня",
+      })
+    ).status,
     401,
-    "state requires a session token",
   );
-  const noToken = await fetch(base + "/api/staff/stop", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "Сырники", station: "Кухня" }),
-  });
-  assert.equal(noToken.status, 401);
-});
-
-// One session drives the rest of the team checks: STAFF_PIN is the emergency
-// admin login used because the test bot is offline.
-async function staffLogin() {
-  const response = await fetch(base + "/api/staff/login", {
+  // The old password entrance is gone for good, not merely disabled: the
+  // route does not exist any more, so a posted password reaches no handler.
+  const old = await fetch(base + "/api/staff/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ login: "admin", password: "test-staff-pin" }),
   });
+  assert.equal(old.status, 401, "there is no password route to talk to");
+  // A forged signature does not pass.
+  const forged = await fetch(base + "/api/staff/telegram", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      initData: makeInitData(adminUser).replace(/hash=[^&]+/, "hash=deadbeef"),
+    }),
+  });
+  assert.equal(forged.status, 401);
+  // A stranger who really is in Telegram is still not an admin.
+  const stranger = await fetch(base + "/api/staff/telegram", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      initData: makeInitData({ id: 999111222, first_name: "Кто-то" }),
+    }),
+  });
+  assert.equal(stranger.status, 403);
+  assert.match((await stranger.json()).error, /не администратор/);
+  // A session left over from the password era is dead: it has a login instead
+  // of a Telegram id, so it must not open the page any more.
+  const filename = join(directory, "data/staff.json");
+  let legacy = {};
+  try {
+    legacy = JSON.parse(await readFile(filename, "utf8"));
+  } catch {}
+  legacy.accounts = [
+    { login: "old", name: "Старый", role: "админ", salt: "x", hash: "y" },
+  ];
+  legacy.sessions = {
+    ...(legacy.sessions || {}),
+    "old-token": { login: "old", exp: Date.now() + 1000000 },
+  };
+  await writeFile(filename, JSON.stringify(legacy, null, 2));
+  assert.equal(
+    (
+      await fetch(base + "/api/staff/state", {
+        headers: { "X-Staff-Token": "old-token" },
+      })
+    ).status,
+    401,
+    "an old login session no longer opens the team page",
+  );
+  // The real admin is in and has every right.
+  const login = await fetch(base + "/api/staff/telegram", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ initData: makeInitData(adminUser) }),
+  });
+  assert.equal(login.status, 200);
+  const data = await login.json();
+  assert.ok(data.token, "a session token comes back");
+  assert.deepEqual(data.me.permissions.manageStations, ["Кухня", "Бар"]);
+  const state = await (
+    await fetch(base + "/api/staff/state", {
+      headers: { "X-Staff-Token": data.token },
+    })
+  ).json();
+  assert.equal(state.me.name, "Босс");
+  assert.equal(state.permissions.recipes, true);
+});
+
+let staffToken = "";
+async function staffLogin() {
+  if (staffToken) return staffToken;
+  const response = await fetch(base + "/api/staff/telegram", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ initData: makeInitData(adminUser) }),
+  });
   assert.equal(response.status, 200);
-  const data = await response.json();
-  assert.ok(data.token);
-  return data.token;
+  staffToken = (await response.json()).token;
+  return staffToken;
 }
 const staffPost = (token, path, body) =>
   fetch(base + path, {
@@ -618,107 +856,89 @@ const staffPost = (token, path, body) =>
     headers: { "Content-Type": "application/json", "X-Staff-Token": token },
     body: JSON.stringify(body),
   });
-async function addTestStaffAccount(login, name, role, password = "test-password") {
-  const filename = join(directory, "data/staff.json");
-  let state = {};
-  try {
-    state = JSON.parse(await readFile(filename, "utf8"));
-  } catch {}
-  state.accounts = state.accounts || [];
-  state.sessions = state.sessions || {};
-  state.stop = state.stop || [];
-  state.go = state.go || [];
-  state.shift = state.shift || [];
-  state.board = state.board || [];
-  state.recipes = state.recipes || {};
-  const salt = randomBytes(8).toString("hex");
-  state.accounts = state.accounts.filter((account) => account.login !== login);
-  state.accounts.push({
-    login,
-    name,
-    role,
-    salt,
-    hash: scryptSync(password, salt, 32).toString("hex"),
+
+test("a one-time link opens /staff in a plain browser", async () => {
+  pushUpdate({
+    callback_query: {
+      id: "cb-link",
+      from: { id: 123456789, first_name: "Босс" },
+      data: "m:link",
+      message: { chat: { id: 123456789 }, message_id: 21, text: "меню" },
+    },
   });
-  await writeFile(filename, JSON.stringify(state, null, 2));
-  return password;
-}
-async function loginAsStaff(login, password) {
-  const response = await fetch(base + "/api/staff/login", {
+  const link = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      /Ссылка на страницу команды/.test(String(call.body.text)),
+  );
+  const url = link.body.reply_markup.inline_keyboard[0][0].url;
+  assert.match(url, /^https:\/\/app\.example\.test\/staff#key=/);
+  const key = new URL(url).hash.replace("#key=", "");
+  const ok = await fetch(base + "/api/staff/key", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ login, password }),
+    body: JSON.stringify({ key }),
   });
-  assert.equal(response.status, 200, "staff login should succeed for " + login);
-  return response.json();
-}
-async function staffStateFor(token) {
-  const response = await fetch(base + "/api/staff/state", {
-    headers: { "X-Staff-Token": token },
-  });
-  assert.equal(response.status, 200);
-  return response.json();
-}
-
-test("roles separate kitchen, bar, read-only, admin and recipe permissions", async () => {
-  const password = "test-password";
-  await addTestStaffAccount("cook1", "Шеф", "шеф-повар", password);
-  await addTestStaffAccount("barista1", "Бариста", "бариста", password);
-  await addTestStaffAccount("cashier1", "Кассир", "касса", password);
-  await addTestStaffAccount("manager1", "Управляющий", "управляющий", password);
-  const cook = await loginAsStaff("cook1", password);
-  const barista = await loginAsStaff("barista1", password);
-  const cashier = await loginAsStaff("cashier1", password);
-  const manager = await loginAsStaff("manager1", password);
-
-  const cookState = await staffStateFor(cook.token);
-  assert.deepEqual(cookState.permissions.manageStations, ["Кухня"]);
-  assert.equal(cookState.permissions.recipes, true);
-  assert.deepEqual(cookState.me.permissions.manageStations, ["Кухня"]);
-  assert.deepEqual((await staffStateFor(barista.token)).permissions.manageStations, ["Бар"]);
-  assert.equal((await staffStateFor(barista.token)).permissions.recipes, false);
-  assert.deepEqual((await staffStateFor(cashier.token)).permissions.manageStations, []);
-  assert.deepEqual((await staffStateFor(manager.token)).permissions.manageStations, ["Кухня", "Бар"]);
-
+  assert.equal(ok.status, 200);
+  const data = await ok.json();
   assert.equal(
-    (await staffPost(cook.token, "/api/staff/stop", {
-      name: "Не мой бар",
-      station: "Бар",
-    })).status,
-    403,
-    "a cook cannot edit the bar list",
+    (
+      await fetch(base + "/api/staff/state", {
+        headers: { "X-Staff-Token": data.token },
+      })
+    ).status,
+    200,
+  );
+  // One use only, and a made-up key is refused.
+  assert.equal(
+    (
+      await fetch(base + "/api/staff/key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      })
+    ).status,
+    401,
   );
   assert.equal(
-    (await staffPost(barista.token, "/api/staff/go", {
-      name: "Не моя кухня",
-      station: "Кухня",
-    })).status,
-    403,
-    "a barista cannot edit the kitchen list",
+    (
+      await fetch(base + "/api/staff/key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: "нет-такого" }),
+      })
+    ).status,
+    401,
   );
-  assert.equal(
-    (await staffPost(cook.token, "/api/staff/stop", {
-      itemId: "большой-латте",
-      name: "Большой латте",
-      station: "Кухня",
-    })).status,
-    400,
-    "a kitchen operator cannot mislabel a drink as a kitchen item",
-  );
-  assert.equal(
-    (await staffPost(cashier.token, "/api/staff/stop", {
-      name: "Только просмотр",
-      station: "Кухня",
-    })).status,
-    403,
-  );
+});
 
-  const recipe = await staffPost(cook.token, "/api/staff/recipes", {
+test("every admin has every right: no roles, no stations split by role", async () => {
+  const source = await readFile(join(directory, "server.js"), "utf8");
+  assert.doesNotMatch(source, /staffRoles/);
+  assert.doesNotMatch(source, /manageStations\.includes/);
+  const token = await staffLogin();
+  // Both stations are editable by the same person.
+  for (const station of ["Кухня", "Бар"]) {
+    const response = await staffPost(token, "/api/staff/stop", {
+      name: "Тест " + station,
+      station,
+    });
+    assert.equal(response.status, 200, station);
+    const stop = (await response.json()).stop;
+    assert.equal(stop[0].station, station);
+    await staffPost(token, "/api/staff/stop", {
+      action: "remove",
+      id: stop[0].id,
+    });
+  }
+  // Recipe cards are open too, and the algorithm reaches the bot with the order.
+  const recipe = await staffPost(token, "/api/staff/recipes", {
     itemId: "сырники",
     text: "1. Подготовить ингредиенты.\n2. Приготовить и проверить подачу.",
   });
   assert.equal(recipe.status, 200);
-  assert.equal((await recipe.json()).recipes["сырники"].by, "Шеф");
+  assert.equal((await recipe.json()).recipes["сырники"].by, "Босс");
   const placed = await fetch(base + "/api/orders", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -734,24 +954,141 @@ test("roles separate kitchen, bar, read-only, admin and recipe permissions", asy
   const instructions = await waitForTelegramCall(
     (call) =>
       call.method === "sendMessage" &&
-      String(call.body.text).includes(`Алгоритм действий по блюдам заказа #${placedOrder.id}`),
+      String(call.body.text).includes(
+        `Алгоритм действий по блюдам заказа #${placedOrder.id}`,
+      ),
   );
   assert.match(instructions.body.text, /Сырники × 1/);
   assert.match(instructions.body.text, /Подготовить ингредиенты/);
-  assert.equal(
-    (await staffPost(barista.token, "/api/staff/recipes", {
-      itemId: "сырники",
-      text: "Не разрешено",
-    })).status,
-    403,
-    "recipe cards are for cooks and managers only",
+  // Logins, roles and password hashes are gone from the stored data.
+  const stored = JSON.parse(await readFile(join(directory, "data/staff.json"), "utf8"));
+  assert.equal(stored.accounts, undefined);
+  assert.ok(
+    !Object.values(stored.sessions || {}).some((session) => session.login),
+    "sessions are Telegram sessions now",
   );
-  assert.deepEqual((await staffStateFor(barista.token)).recipes, {});
-  assert.equal((await staffStateFor(manager.token)).recipes["сырники"].text.startsWith("1."), true);
-  const admin = await staffLogin();
-  assert.deepEqual((await staffStateFor(admin)).permissions.manageStations, ["Кухня", "Бар"]);
 });
 
+// The whole menu is buttons: paying an order and running the stop list never
+// needs a command to be typed out.
+test("the inline menu pays an order and runs the stop list", async () => {
+  const orders = JSON.parse(
+    await readFile(join(directory, "data/orders.json"), "utf8"),
+  );
+  const unpaid = orders.filter((order) => !order.credited).at(-1);
+  pushUpdate({
+    callback_query: {
+      id: "cb-pay",
+      from: { id: 123456789, first_name: "Босс" },
+      data: "pay:" + unpaid.id,
+      message: { chat: { id: 123456789 }, message_id: 31, text: "оплата" },
+    },
+  });
+  const paid = await waitForTelegramCall(
+    (call) =>
+      call.method === "answerCallbackQuery" &&
+      /коинов/i.test(String(call.body.text)),
+  );
+  assert.match(paid.body.text, new RegExp("#" + unpaid.id));
+  const credited = JSON.parse(
+    await readFile(join(directory, "data/orders.json"), "utf8"),
+  );
+  assert.equal(credited.find((order) => order.id === unpaid.id).credited, true);
+  // «Добавить в стоп» asks for a name, then for the station of an item that is
+  // not in the menu, and remembers the answer.
+  pushUpdate({
+    callback_query: {
+      id: "cb-new-stop",
+      from: { id: 123456789, first_name: "Босс" },
+      data: "new:stop",
+      message: { chat: { id: 123456789 }, message_id: 32, text: "стоп" },
+    },
+  });
+  const asked = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      /Что поставить на стоп/.test(String(call.body.text)),
+  );
+  assert.ok(
+    asked.body.reply_markup.inline_keyboard
+      .flat()
+      .some((button) => button.callback_data === "cancel"),
+    "the question can be cancelled",
+  );
+  pushUpdate({
+    message: {
+      chat: { id: 123456789, type: "private" },
+      from: { id: 123456789, first_name: "Босс", username: "boss" },
+      text: "Молоко",
+    },
+  });
+  const station = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      /Куда это относится/.test(String(call.body.text)),
+  );
+  assert.ok(
+    station.body.reply_markup.inline_keyboard[0].some(
+      (button) => button.callback_data === "st:Бар",
+    ),
+  );
+  pushUpdate({
+    callback_query: {
+      id: "cb-station",
+      from: { id: 123456789, first_name: "Босс" },
+      data: "st:Бар",
+      message: { chat: { id: 123456789 }, message_id: 33, text: "куда" },
+    },
+  });
+  const done = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      /снято с продажи/.test(String(call.body.text)),
+  );
+  assert.match(done.body.text, /Молоко/);
+  const stopped = JSON.parse(
+    await readFile(join(directory, "data/staff.json"), "utf8"),
+  );
+  assert.equal(stopped.stop[0].name, "Молоко");
+  assert.equal(stopped.stop[0].station, "Бар");
+  assert.equal(stopped.stop[0].by, "Босс", "the change is signed by the admin");
+  // A menu item knows its own station, so it never asks.
+  pushUpdate({
+    message: {
+      chat: { id: 123456789, type: "private" },
+      from: { id: 123456789, first_name: "Босс", username: "boss" },
+      text: "/stoplist",
+    },
+  });
+  await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      /Стоп-лист:/.test(String(call.body.text)),
+  );
+  // And one tap on the entry returns it to sale.
+  pushUpdate({
+    callback_query: {
+      id: "cb-rm",
+      from: { id: 123456789, first_name: "Босс" },
+      data: "rm:stop:" + stopped.stop[0].id,
+      message: { chat: { id: 123456789 }, message_id: 34, text: "стоп" },
+    },
+  });
+  const back = await waitForTelegramCall(
+    (call) =>
+      call.method === "answerCallbackQuery" &&
+      /Вернули в продажу/.test(String(call.body.text)),
+  );
+  assert.ok(back);
+  const after = JSON.parse(
+    await readFile(join(directory, "data/staff.json"), "utf8"),
+  );
+  assert.equal(after.stop.length, 0);
+});
 test("stop list removes an item from sale until the team returns it", async () => {
   const token = await staffLogin();
   const added = await staffPost(token, "/api/staff/stop", {
@@ -762,7 +1099,7 @@ test("stop list removes an item from sale until the team returns it", async () =
   assert.equal(added.status, 200);
   const stopped = (await added.json()).stop;
   assert.equal(stopped[0].name, "Сырники");
-  assert.equal(stopped[0].by, "Админ", "the change is signed by the account");
+  assert.equal(stopped[0].by, "Босс", "the change is signed by the admin");
   // The customer menu now carries the flag…
   const menu = await (await fetch(base + "/api/menu")).json();
   assert.equal(menu.find((p) => p.id === "сырники").stop, true);

@@ -8,11 +8,7 @@ const root = path.dirname(fileURLToPath(import.meta.url)),
 fs.mkdirSync(dataDir, { recursive: true });
 const file = path.join(dataDir, "orders.json");
 const token = process.env.BOT_TOKEN || "",
-  telegramApiUrl = (process.env.TELEGRAM_API_URL || "https://api.telegram.org").replace(/\/+$/, ""),
-  admins = (process.env.ADMIN_IDS || "")
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean);
+  telegramApiUrl = (process.env.TELEGRAM_API_URL || "https://api.telegram.org").replace(/\/+$/, "");
 // Telegram only opens Mini Apps from a public HTTPS URL. When configured, the
 // bot exposes it both as its blue menu button and as the /start launch button.
 const appUrl = (() => {
@@ -25,6 +21,10 @@ const appUrl = (() => {
     return "";
   }
 })();
+// The team page lives next to the app and is opened from the bot, so it needs
+// no password: Telegram says who the user is. Outside Telegram the bot prints
+// a one-time link instead.
+const staffUrl = appUrl ? new URL("/staff", appUrl).toString() : "";
 // Last client error reports per message text: one failure must not flood the
 // admins' bot when the same tap repeats the error.
 const recentErrors = {};
@@ -50,189 +50,283 @@ const buildInfo = () => ({
 // from this same data, so the browser can never invent a price.
 const menu = JSON.parse(fs.readFileSync(path.join(root, "menu.json"), "utf8"));
 // ---------------------------------------------------------------------------
-// Team tools (/staff): station-specific stop/go lists, kitchen recipe cards,
-// the shift roster and an internal question board. Everything lives in
-// data/staff.json (never published over HTTP). Numeric ADMIN_IDS issue team
-// accounts and roles in Telegram; the API enforces each role's permissions.
+// Admins. The whole access model is a numeric Telegram id: the ids from
+// ADMIN_IDS are the owners, everybody else is added by an admin with the
+// «➕ Добавить админа» button or /addadmin and is kept in data/admins.json.
+// No logins, no passwords, no roles — an admin gets everything: every screen
+// of the bot menu and full access to the /staff page.
+const adminsFile = path.join(dataDir, "admins.json");
+const ownerIds = (process.env.ADMIN_IDS || "")
+  .split(",")
+  .map((x) => x.trim())
+  .filter(Boolean);
+const readAdmins = () => {
+  try {
+    const raw = JSON.parse(fs.readFileSync(adminsFile, "utf8"));
+    const list = Array.isArray(raw?.admins) ? raw.admins : [];
+    return list
+      .filter((a) => a && a.id)
+      .map((a) => ({
+        id: String(a.id).replace(/\D/g, ""),
+        name: String(a.name || "").slice(0, 60),
+        username: String(a.username || "").replace(/^@/, "").slice(0, 40),
+        addedBy: String(a.addedBy || ""),
+        addedAt: String(a.addedAt || ""),
+      }))
+      .filter((a) => a.id);
+  } catch {
+    return [];
+  }
+};
+const writeAdmins = (list) =>
+  fs.writeFileSync(adminsFile, JSON.stringify({ admins: list }, null, 2));
+// Everyone who ever wrote to the bot, newest first. This is how «add @nick»
+// resolves a nickname and how the «Добавить админа» screen offers people to
+// pick from with one tap. Only the id, the name and the nickname are kept.
+const peopleFile = path.join(dataDir, "people.json");
+const readPeople = () => {
+  try {
+    const raw = JSON.parse(fs.readFileSync(peopleFile, "utf8"));
+    return Array.isArray(raw?.people) ? raw.people : [];
+  } catch {
+    return [];
+  }
+};
+const writePeople = (list) =>
+  fs.writeFileSync(
+    peopleFile,
+    JSON.stringify({ people: list.slice(0, 200) }, null, 2),
+  );
+const personName = (from) =>
+  [from?.first_name, from?.last_name].filter(Boolean).join(" ").slice(0, 60);
+function rememberPerson(from) {
+  if (!from?.id) return;
+  const id = String(from.id);
+  const people = readPeople().filter((p) => String(p.id) !== id);
+  people.unshift({
+    id,
+    name: personName(from),
+    username: String(from.username || "").slice(0, 40),
+    seenAt: new Date().toISOString(),
+  });
+  writePeople(people);
+}
+const findPerson = (id) => readPeople().find((p) => String(p.id) === String(id));
+const findPersonByUsername = (name) => {
+  const needle = String(name || "").replace(/^@/, "").toLowerCase();
+  return needle
+    ? readPeople().find(
+        (p) => String(p.username || "").toLowerCase() === needle,
+      )
+    : null;
+};
+// Owners first, then the admins added from the bot. Names are filled in from
+// the people list, so an id added as a bare number still shows a human name.
+function adminList() {
+  const byId = new Map();
+  const push = (admin) => {
+    const person = findPerson(admin.id);
+    byId.set(String(admin.id), {
+      id: String(admin.id),
+      name: admin.name || person?.name || "",
+      username: admin.username || person?.username || "",
+      owner: !!admin.owner,
+      addedBy: admin.addedBy || "",
+      addedAt: admin.addedAt || "",
+    });
+  };
+  for (const id of ownerIds) push({ id, owner: true });
+  for (const admin of readAdmins()) push(admin);
+  return [...byId.values()];
+}
+const adminIds = () => adminList().map((a) => a.id);
+const isAdmin = (id) => adminIds().includes(String(id || "").replace(/\D/g, ""));
+const isOwnerAdmin = (id) => ownerIds.includes(String(id || ""));
+function addAdmin(id, extra = {}) {
+  id = String(id || "").replace(/\D/g, "");
+  if (!id) return { error: "Нужен числовой Telegram ID" };
+  if (ownerIds.includes(id))
+    return { error: "Этот ID уже главный администратор — он задан в ADMIN_IDS" };
+  const list = readAdmins();
+  const existing = list.find((a) => String(a.id) === id);
+  if (existing) {
+    existing.name = extra.name || existing.name;
+    existing.username = extra.username || existing.username;
+    writeAdmins(list);
+    return { admin: existing, already: true };
+  }
+  const admin = {
+    id,
+    name: String(extra.name || "").slice(0, 60),
+    username: String(extra.username || "").replace(/^@/, "").slice(0, 40),
+    addedBy: String(extra.addedBy || ""),
+    addedAt: new Date().toISOString(),
+  };
+  list.push(admin);
+  writeAdmins(list);
+  return { admin };
+}
+function removeAdmin(id) {
+  id = String(id || "").replace(/\D/g, "");
+  if (ownerIds.includes(id))
+    return {
+      error:
+        "Главный администратор задан в ADMIN_IDS — уберите его там и перезапустите бота",
+    };
+  const list = readAdmins();
+  const next = list.filter((a) => String(a.id) !== id);
+  if (next.length === list.length)
+    return { error: "Админ с таким ID не найден" };
+  writeAdmins(next);
+  return { ok: true };
+}
+const personLabel = (p) => {
+  const parts = [p.name, p.username ? "@" + p.username : ""].filter(Boolean);
+  return parts.length ? `${parts.join(" ")} · id ${p.id}` : `id ${p.id}`;
+};
+// Buttons are narrow: the short form drops the numeric id.
+const shortPersonLabel = (p) =>
+  [p.name, p.username ? "@" + p.username : ""].filter(Boolean).join(" ") ||
+  "id " + p.id;
+
+// ---------------------------------------------------------------------------
+// Team tools (/staff): stop/go lists, kitchen recipe cards, the shift roster
+// and an internal question board. Everything lives in data/staff.json (never
+// published over HTTP). The page has no login form: it is opened from the bot,
+// Telegram says who the user is, and every admin gets the full tool set.
 const staffFile = path.join(dataDir, "staff.json");
-// Optional emergency access while the bot is not set up yet: login «admin»
-// with this password. Empty by default, so production has no shared code.
-const staffPin = process.env.STAFF_PIN || "";
 const emptyStaff = () => ({
-  accounts: [],
-  sessions: {},
   stop: [],
   go: [],
   shift: [],
   board: [],
   recipes: {},
+  sessions: {},
 });
 const readStaff = () => {
   try {
     const raw = JSON.parse(fs.readFileSync(staffFile, "utf8"));
-    return { ...emptyStaff(), ...raw };
+    const state = { ...emptyStaff(), ...raw };
+    // Sessions from the password era carry a login instead of a Telegram id;
+    // they are dead and are dropped as soon as the file is read.
+    for (const [key, session] of Object.entries(state.sessions))
+      if (!session || typeof session !== "object" || !session.tg)
+        delete state.sessions[key];
+    return state;
   } catch {
     return emptyStaff();
   }
 };
-const writeStaff = (state) =>
-  fs.writeFileSync(staffFile, JSON.stringify(state, null, 2));
-const today = () => new Date().toISOString().slice(0, 10);
-// Passwords are never stored: only scrypt hashes with a per-account salt.
-const hashPassword = (password, salt) =>
-  crypto.scryptSync(String(password), salt, 32).toString("hex");
-// Readable one-time password without lookalike characters (0/O, 1/l/I).
-const generatePassword = () => {
-  const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
-  let out = "";
-  for (let i = 0; i < 8; i++)
-    out += alphabet[crypto.randomInt(alphabet.length)];
-  return out;
-};
-const staffRoles = [
-  "бариста",
-  "официант",
-  "повар",
-  "кухня",
-  "бар",
-  "касса",
-  "старший",
-  "управляющий",
-  "админ",
-];
-const allStations = ["Кухня", "Бар"];
-const normalizeStaffRole = (role) => {
-  const value = String(role || "").trim().toLowerCase();
-  if (value === "администратор") return "админ";
-  if (value === "шеф-повар" || value === "шефповар") return "повар";
-  return value;
-};
-// Permissions are enforced by the API, not just hidden in the staff page.
-// Cooks own the kitchen lists, baristas own the bar lists, and senior staff
-// have both. Waiters/cashiers can see both lists but cannot change them.
-function staffPermissions(role) {
-  const normalized = normalizeStaffRole(role);
-  const full = ["старший", "управляющий", "админ"].includes(normalized);
-  const ownStation = ["повар", "кухня"].includes(normalized)
-    ? "Кухня"
-    : ["бариста", "бар"].includes(normalized)
-      ? "Бар"
-      : "";
-  const viewStations = full
-    ? allStations
-    : ownStation
-      ? [ownStation]
-      : ["официант", "касса"].includes(normalized)
-        ? allStations
-        : [];
-  return {
-    viewStations: [...viewStations],
-    manageStations: full ? [...allStations] : ownStation ? [ownStation] : [],
-    recipes: full || ["повар", "кухня"].includes(normalized),
-    shift: true,
-    board: true,
-  };
+// Sessions are what is left of «accounts»: a random token per device, two
+// months long, pruned on every write. Logins, roles and password hashes from
+// older versions are dropped the first time the file is written again.
+function writeStaff(state) {
+  const copy = { ...state };
+  delete copy.accounts;
+  const now = Date.now();
+  copy.sessions = copy.sessions || {};
+  for (const [key, session] of Object.entries(copy.sessions))
+    if (!session || !session.tg || session.exp < now) delete copy.sessions[key];
+  fs.writeFileSync(staffFile, JSON.stringify(copy, null, 2));
 }
+const staffSessionAccount = (state, value) => {
+  const session = state.sessions?.[String(value || "")];
+  if (!session?.tg || session.exp < Date.now()) return null;
+  return {
+    login: "tg:" + session.tg,
+    name: session.name || "Админ",
+    role: "админ",
+  };
+};
+function createStaffSession(state, tg, name) {
+  const value = crypto.randomBytes(24).toString("base64url");
+  state.sessions = state.sessions || {};
+  state.sessions[value] = {
+    tg: String(tg),
+    name: String(name || "").slice(0, 60) || "Админ",
+    exp: Date.now() + 60 * 24 * 3600 * 1000,
+  };
+  return value;
+}
+// A one-time link for a browser outside Telegram: the bot prints a fresh one,
+// it works once and stops working in 15 minutes. Kept in memory on purpose —
+// a restart simply makes every printed link stale.
+const staffLinks = {};
+function createStaffLink(by) {
+  const now = Date.now();
+  for (const [key, link] of Object.entries(staffLinks))
+    if (!link || link.exp < now) delete staffLinks[key];
+  const key = crypto.randomBytes(12).toString("base64url");
+  staffLinks[key] = { exp: now + 15 * 60 * 1000, by: String(by || "") };
+  return key;
+}
+// Telegram signs everything it hands to a Mini App, so the page can prove who
+// opened it without a password of its own.
+function telegramUserFromInitData(initData) {
+  if (!token || !initData) return null;
+  const params = new URLSearchParams(String(initData));
+  const hash = params.get("hash");
+  if (!hash) return null;
+  params.delete("hash");
+  const pairs = [...params.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => `${key}=${value}`);
+  const secret = crypto
+    .createHmac("sha256", "WebAppData")
+    .update(token)
+    .digest();
+  const computed = crypto
+    .createHmac("sha256", secret)
+    .update(pairs.join("\n"))
+    .digest("hex");
+  if (computed !== hash) return null;
+  const authDate = Number(params.get("auth_date") || 0);
+  if (!authDate || Math.abs(Date.now() / 1000 - authDate) > 24 * 3600) return null;
+  try {
+    return JSON.parse(params.get("user") || "null");
+  } catch {
+    return null;
+  }
+}
+const today = () => new Date().toISOString().slice(0, 10);
+const allStations = ["Кухня", "Бар"];
+// Every admin has every right: the page no longer splits the kitchen from the
+// bar by role.
+const fullPermissions = {
+  viewStations: [...allStations],
+  manageStations: [...allStations],
+  recipes: true,
+  shift: true,
+  board: true,
+};
 const stationForProduct = (product) =>
   product?.category === "Еда" ? "Кухня" : "Бар";
-const roleDescription = (role) => {
-  const normalized = normalizeStaffRole(role);
-  if (["повар", "кухня"].includes(normalized))
-    return "стоп- и гоу-листы кухни, технологические карты, смена и вопросы";
-  if (["бариста", "бар"].includes(normalized))
-    return "стоп- и гоу-листы бара, смена и вопросы";
-  if (["официант", "касса"].includes(normalized))
-    return "просмотр обоих списков, смена и вопросы";
-  if (["старший", "управляющий", "админ"].includes(normalized))
-    return "полный доступ к кухне и бару, технологическим картам, смене и вопросам";
-  return "только смена и вопросы";
-};
-// Creates an account and returns the generated password exactly once — the
-// admin forwards it to the person, the server keeps only the hash.
-function createAccount(state, login, name, role, createdBy) {
-  login = String(login || "").toLowerCase();
-  if (!/^[a-z0-9._-]{3,20}$/.test(login))
-    return {
-      error:
-        "Логин: 3–20 символов, латиница, цифры, точка, дефис. Пример: /adduser anya Аня бариста",
-    };
-  if (login === "admin" || state.accounts.some((a) => a.login === login))
-    return { error: `Логин «${login}» уже занят` };
-  const normalizedRole = normalizeStaffRole(role || "бариста");
-  if (!staffRoles.includes(normalizedRole))
-    return { error: `Неизвестная роль «${role}». Доступные роли: ${staffRoles.join(", ")}` };
-  const password = generatePassword();
-  const salt = crypto.randomBytes(8).toString("hex");
-  state.accounts.push({
-    login,
-    name: String(name || login).slice(0, 40),
-    role: normalizedRole,
-    salt,
-    hash: hashPassword(password, salt),
-    createdAt: new Date().toISOString(),
-    createdBy: String(createdBy || ""),
-  });
-  return { login, password, role: normalizedRole };
-}
-// Sessions: a random token per device, two months long, pruned on write.
-function pruneSessions(state) {
-  const now = Date.now();
-  for (const [token, s] of Object.entries(state.sessions))
-    if (!s || s.exp < now) delete state.sessions[token];
-}
-function createSession(state, login) {
-  pruneSessions(state);
-  const token = crypto.randomBytes(24).toString("base64url");
-  state.sessions[token] = { login, exp: Date.now() + 60 * 24 * 3600 * 1000 };
-  return token;
-}
-function sessionAccount(state, token) {
-  const s = state.sessions[String(token || "")];
-  if (!s || s.exp < Date.now()) return null;
-  if (s.login === "admin" && staffPin)
-    return { login: "admin", name: "Админ", role: "админ" };
-  return state.accounts.find((a) => a.login === s.login) || null;
-}
-// A guessed password must not be free: 10 attempts per login per 10 minutes.
-const loginAttempts = {};
-function loginAllowed(login) {
-  const now = Date.now();
-  const entry = loginAttempts[login] || { count: 0, since: now };
-  if (now - entry.since > 600000) {
-    entry.count = 0;
-    entry.since = now;
-  }
-  loginAttempts[login] = entry;
-  return entry.count < 10;
-}
-// The public state: the shift roster only shows today, the board keeps the
-// last 100 notes so the file cannot grow forever. Accounts and sessions never
-// leave the server.
 function staffState() {
   const state = readStaff();
   let changed =
     state.shift.some((s) => s.date !== today()) || state.board.length > 100;
   state.shift = state.shift.filter((s) => s.date === today());
   state.board = state.board.slice(0, 100);
-  if (!state.recipes || typeof state.recipes !== "object" || Array.isArray(state.recipes)) {
+  if (
+    !state.recipes ||
+    typeof state.recipes !== "object" ||
+    Array.isArray(state.recipes)
+  ) {
     state.recipes = {};
     changed = true;
   }
   if (changed) writeStaff(state);
   return state;
 }
-const staffPublicState = (state, account) => {
-  const permissions = staffPermissions(account?.role);
-  return {
-    stop: state.stop.filter((entry) => permissions.viewStations.includes(entry.station)),
-    go: state.go.filter((entry) => permissions.viewStations.includes(entry.station)),
-    shift: state.shift,
-    board: state.board,
-    menu: menuNames(),
-    recipes: permissions.recipes ? state.recipes : {},
-    permissions,
-  };
-};
+const staffPublicState = (state) => ({
+  stop: state.stop,
+  go: state.go,
+  shift: state.shift,
+  board: state.board,
+  menu: menuNames(),
+  recipes: state.recipes,
+  permissions: fullPermissions,
+});
 const stoppedIds = () =>
   new Set(
     readStaff()
@@ -415,6 +509,600 @@ async function welcomeGuest(chatId) {
     };
   await telegram("sendMessage", body);
 }
+// ---------------------------------------------------------------------------
+// The bot. Guests get the welcome and the app button. Admins get the same
+// things as inline buttons: a shift is two taps, nothing is typed from memory,
+// and the whole team can be onboarded without a single password.
+const recentOrders = (count) => read().slice(-count).reverse();
+const formatOrder = (o) =>
+  `#${o.id} · ${o.status}${o.credited ? ` · +${o.coinsEarned} коинов` : ""}\n` +
+  `${o.customer.name} · ${o.customer.phone}\n` +
+  `${o.items.map((i) => `${lineTitle(i)} × ${i.qty}`).join(", ")}\n` +
+  `${o.type === "here" ? "В кофейне" : "К выдаче"} · ${o.branch}\n${money(o.total)}`;
+const backRow = [{ text: "◀️ В меню", callback_data: "m:main" }];
+const notifyAdmins = (text) => {
+  for (const id of adminIds())
+    telegram("sendMessage", { chat_id: Number(id), text });
+};
+// A screen is one message: a text and a keyboard. The bot edits the current
+// message when it can, so a shift of button presses leaves one clean message
+// behind instead of a wall of them.
+function screenMain() {
+  return {
+    text:
+      "☕ Большой Кофе — меню администратора\n\n" +
+      "Новые заказы приходят сюда сами. Коины гостю начисляются кнопкой " +
+      "«Оплатить» — нажмите её, когда гость рассчитался.\n\nВыберите раздел:",
+    keyboard: [
+      [
+        { text: "📋 Заказы", callback_data: "m:orders" },
+        { text: "💳 Оплатить", callback_data: "m:pay" },
+      ],
+      [
+        { text: "🛑 Стоп-лист", callback_data: "m:stop" },
+        { text: "🏁 Гоу-лист", callback_data: "m:go" },
+      ],
+      [
+        { text: "👥 Админы", callback_data: "m:admins" },
+        { text: "➕ Добавить админа", callback_data: "m:addadmin" },
+      ],
+      ...(staffUrl
+        ? [
+            [
+              { text: "🛠 Открыть /staff", web_app: { url: staffUrl } },
+              { text: "🔑 Ссылка на /staff", callback_data: "m:link" },
+            ],
+          ]
+        : []),
+      ...(appUrl
+        ? [[{ text: "☕ Открыть приложение", web_app: { url: appUrl } }]]
+        : []),
+      [{ text: "❓ Помощь", callback_data: "m:help" }],
+    ],
+  };
+}
+function screenOrders() {
+  const orders = recentOrders(6);
+  return {
+    text: orders.length
+      ? "📋 Последние заказы:\n\n" + orders.map(formatOrder).join("\n\n")
+      : "Заказов пока нет. Как только гость оформит заказ, он появится здесь.",
+    keyboard: [
+      [{ text: "💳 Отметить оплаченным", callback_data: "m:pay" }],
+      backRow,
+    ],
+  };
+}
+function screenPay() {
+  const unpaid = read()
+    .filter((o) => !o.credited)
+    .slice(-8)
+    .reverse();
+  return {
+    text: unpaid.length
+      ? "💳 Какой заказ оплачен? Нажмите — гостю начислятся коины."
+      : "Неоплаченных заказов нет 🎉",
+    keyboard: [
+      ...unpaid.map((o) => [
+        {
+          text: `#${o.id} · ${money(o.total)} · +${o.coinsEarned} коинов`,
+          callback_data: "pay:" + o.id,
+        },
+      ]),
+      backRow,
+    ],
+  };
+}
+function screenList(kind) {
+  const isStop = kind === "stop";
+  const entries = staffState()[kind] || [];
+  const lines = entries.map(
+    (e) =>
+      `· ${e.name} (${String(e.station).toLowerCase()})${e.by ? " — " + e.by : ""}`,
+  );
+  return {
+    text:
+      (entries.length
+        ? `${isStop ? "🛑 Стоп-лист" : "🏁 Гоу-лист"}:\n${lines.join("\n")}\n\nНажмите на позицию, чтобы ${isStop ? "вернуть её в продажу" : "убрать её из списка"}.`
+        : isStop
+          ? "Стоп-лист пуст — всё в продаже 👌"
+          : "Гоу-лист пуст. Добавьте, что сегодня продаём активнее.") +
+      (isStop
+        ? "\n\nСтоп-лист сразу убирает позицию из меню у гостей."
+        : ""),
+    keyboard: [
+      ...entries.slice(0, 12).map((e) => [
+        {
+          text: `${isStop ? "✅" : "➖"} ${e.name}`,
+          callback_data: `rm:${kind}:${e.id}`,
+        },
+      ]),
+      [
+        {
+          text: isStop ? "➕ Добавить в стоп" : "➕ Добавить в гоу-лист",
+          callback_data: "new:" + kind,
+        },
+      ],
+      backRow,
+    ],
+  };
+}
+function screenAdmins() {
+  const list = adminList();
+  return {
+    text:
+      "👥 Администраторы:\n" +
+      list.map((a) => `· ${personLabel(a)}${a.owner ? " · главный" : ""}`).join("\n") +
+      "\n\nПрава у всех одинаковые: всё меню бота и полный доступ к странице команды. " +
+      "Главный администратор задан в ADMIN_IDS — из бота его не удалить.",
+    keyboard: [
+      ...list.map((a) => [
+        a.owner
+          ? { text: "🔒 " + shortPersonLabel(a), callback_data: "owner:" + a.id }
+          : { text: "❌ " + shortPersonLabel(a), callback_data: "del:" + a.id },
+      ]),
+      [{ text: "➕ Добавить админа", callback_data: "m:addadmin" }],
+      backRow,
+    ],
+  };
+}
+function screenAddAdmin() {
+  const candidates = readPeople().filter((p) => !isAdmin(p.id)).slice(0, 8);
+  return {
+    text:
+      "➕ Добавить админа\n\n" +
+      "Нажмите на человека — он станет администратором сразу. Или пришлите его " +
+      "Telegram ID или @ник, либо перешлите в бот его сообщение и ответьте на него /addadmin.\n\n" +
+      (candidates.length
+        ? "Кто писал боту последним:"
+        : "Список пуст: попросите человека нажать /start у бота и вернитесь сюда."),
+    keyboard: [
+      ...candidates.map((p) => [
+        { text: "➕ " + shortPersonLabel(p), callback_data: "add:" + p.id },
+      ]),
+      [{ text: "◀️ К админам", callback_data: "m:admins" }],
+    ],
+  };
+}
+function screenHelp() {
+  return {
+    text:
+      "❓ Помощь\n\n" +
+      "Всё делается кнопками: /menu открывает меню администратора.\n\n" +
+      "Команды — если так быстрее:\n" +
+      "/menu — меню\n" +
+      "/orders — последние заказы\n" +
+      "/paid НОМЕР — отметить заказ оплаченным\n" +
+      "/stoplist — текущий стоп-лист\n" +
+      "/admins — список админов\n" +
+      "/addadmin ID или @ник — добавить админа\n" +
+      "/deladmin ID — убрать админа\n" +
+      "/id — ваш Telegram ID\n" +
+      "/cancel — отменить начатое действие\n\n" +
+      "Страница команды (/staff) открывается кнопкой из меню: стоп-листы, " +
+      "гоу-листы, техкарты, смена и вопросы. Паролей нет — вход по Telegram.",
+    keyboard: [backRow],
+  };
+}
+const screens = {
+  main: screenMain,
+  orders: screenOrders,
+  pay: screenPay,
+  stop: () => screenList("stop"),
+  go: () => screenList("go"),
+  admins: screenAdmins,
+  addadmin: screenAddAdmin,
+  help: screenHelp,
+};
+async function showScreen(chatId, name, messageId) {
+  const screen = (screens[name] || screens.main)();
+  const markup = { inline_keyboard: screen.keyboard };
+  const chunks = splitTelegramText(screen.text, 3500);
+  if (messageId && chunks.length === 1) {
+    const edited = await telegram("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: chunks[0],
+      reply_markup: markup,
+      disable_web_page_preview: true,
+    });
+    // «message is not modified» is normal: the same button was pressed twice.
+    if (edited?.ok || /message is not modified/.test(edited?.description || ""))
+      return;
+  }
+  for (let index = 0; index < chunks.length; index++)
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: chunks[index],
+      disable_web_page_preview: true,
+      ...(index === chunks.length - 1 ? { reply_markup: markup } : {}),
+    });
+}
+// A browser outside Telegram has no initData, so the bot prints a single-use
+// link for it: open it on the tablet at the counter and the device is signed
+// in for two months.
+async function sendStaffLink(chatId) {
+  if (!staffUrl) {
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text:
+        "Задайте APP_URL — публичный HTTPS-адрес приложения — и в меню появится " +
+        "кнопка входа на страницу команды.",
+    });
+    return;
+  }
+  const key = createStaffLink(chatId);
+  await telegram("sendMessage", {
+    chat_id: chatId,
+    text:
+      "🔑 Ссылка на страницу команды: работает один раз, 15 минут.\n\n" +
+      "Откройте её в браузере — например, на планшете у кассы: устройство " +
+      "запомнит вход на два месяца.",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🛠 Открыть /staff", url: `${staffUrl}#key=${key}` }],
+      ],
+    },
+  });
+}
+// Text a screen asks for — a stop-list item, a person's id — is remembered
+// here until the admin answers. It is in memory only and expires in 15
+// minutes, so a forgotten question can never swallow a later message.
+const pending = {};
+const setPending = (userId, task) => {
+  pending[String(userId)] = { ...task, at: Date.now() };
+};
+const clearPending = (userId) => {
+  delete pending[String(userId)];
+};
+const takePending = (userId) => {
+  const task = pending[String(userId)];
+  if (!task) return null;
+  if (Date.now() - task.at > 15 * 60 * 1000) {
+    clearPending(userId);
+    return null;
+  }
+  return task;
+};
+async function finishListAdd(chatId, from, task, station) {
+  const chosen = allStations.find(
+    (s) => s.toLowerCase() === String(station || "").trim().toLowerCase(),
+  );
+  if (!chosen) {
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: "Напишите «Кухня» или «Бар» — или /cancel, чтобы отменить.",
+    });
+    return;
+  }
+  clearPending(from.id);
+  const name = String(task.name || "").trim();
+  const state = staffState();
+  const product = menu.find((p) => p.name.toLowerCase() === name.toLowerCase());
+  const finalStation = product ? stationForProduct(product) : chosen;
+  if (state[task.kind].some((x) => x.name === name && x.station === finalStation)) {
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: `«${name}» уже в списке`,
+    });
+    await showScreen(chatId, task.kind);
+    return;
+  }
+  const entry = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    itemId: product ? product.id : "",
+    name,
+    station: finalStation,
+    note: "",
+    by: personName(from) || "админ",
+    at: new Date().toISOString(),
+  };
+  state[task.kind].unshift(entry);
+  writeStaff(state);
+  notifyAdmins(
+    `${task.kind === "stop" ? "🛑 Стоп-лист" : "📣 Гоу-лист"} (${finalStation.toLowerCase()}): «${name}» — ${entry.by}`,
+  );
+  await telegram("sendMessage", {
+    chat_id: chatId,
+    text: task.kind === "stop" ? `✅ «${name}» снято с продажи` : `🏁 «${name}» в гоу-листе`,
+  });
+  await showScreen(chatId, task.kind);
+}
+async function handlePendingAnswer(m, task, text) {
+  const chatId = m.chat.id;
+  const userId = String(m.from.id);
+  const name = String(text)
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .trim()
+    .slice(0, 60);
+  if (task.step === "station")
+    return finishListAdd(chatId, m.from, task, name || " ");
+  if (!name) {
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: "Напишите название — или /cancel, чтобы отменить.",
+    });
+    return;
+  }
+  const product = menu.find((p) => p.name.toLowerCase() === name.toLowerCase());
+  if (product)
+    return finishListAdd(chatId, m.from, { ...task, name }, stationForProduct(product));
+  // Not in the menu — milk, syrup, tart shells. The station cannot be guessed.
+  setPending(userId, { ...task, step: "station", name });
+  await telegram("sendMessage", {
+    chat_id: chatId,
+    text: `«${name}» нет в меню. Куда это относится?`,
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "🍳 Кухня", callback_data: "st:Кухня" },
+          { text: "🥤 Бар", callback_data: "st:Бар" },
+        ],
+        [{ text: "Отмена", callback_data: "cancel" }],
+      ],
+    },
+  });
+}
+// A new admin: by id, by @nickname, or by replying to / forwarding anything
+// the person wrote. Telegram does not resolve nicknames for bots, so «@nick»
+// only works once that person has written to the bot at least once.
+async function commandAddAdmin(m, text) {
+  const chatId = m.chat.id;
+  const arg = text.split(/\s+/).slice(1).join(" ").trim();
+  const target = m.reply_to_message?.from || m.forward_from || null;
+  let id = "";
+  let name = "";
+  let username = "";
+  if (target) {
+    id = String(target.id);
+    name = personName(target);
+    username = target.username || "";
+  } else if (/^\d{5,15}$/.test(arg)) {
+    id = arg;
+    const person = findPerson(id);
+    name = person?.name || "";
+    username = person?.username || "";
+  } else if (/^@?[a-zA-Z0-9_]{4,32}$/.test(arg)) {
+    const person = findPersonByUsername(arg);
+    if (!person) {
+      await telegram("sendMessage", {
+        chat_id: chatId,
+        text:
+          `@${arg.replace(/^@/, "")} ещё не писал этому боту, поэтому я не знаю его ID.\n\n` +
+          "Попросите его нажать /start у бота и повторите команду — или " +
+          "перешлите сюда его сообщение и ответьте на него /addadmin.",
+      });
+      return;
+    }
+    id = person.id;
+    name = person.name;
+    username = person.username;
+  } else {
+    await showScreen(chatId, "addadmin");
+    return;
+  }
+  const result = addAdmin(id, {
+    name,
+    username,
+    addedBy: m.from.username || String(m.from.id),
+  });
+  if (result.error) {
+    await telegram("sendMessage", { chat_id: chatId, text: "⚠️ " + result.error });
+    return;
+  }
+  const label = personLabel({ id, name, username });
+  if (result.already) {
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: `${label} уже администратор.`,
+    });
+    await showScreen(chatId, "admins");
+    return;
+  }
+  const sent = await telegram("sendMessage", {
+    chat_id: Number(id),
+    text:
+      "👋 Вас добавили администратором в бот «Большой Кофе».\n\n" +
+      "У вас есть всё: заказы, начисление коинов, стоп-листы и страница команды. " +
+      "Откройте меню — /menu",
+  });
+  await telegram("sendMessage", {
+    chat_id: chatId,
+    text:
+      `✅ Админ добавлен: ${label}` +
+      (sent?.ok
+        ? ""
+        : "\n\n⚠️ Написать ему не получилось: как только он сам нажмёт /start у бота, меню откроется."),
+  });
+  await showScreen(chatId, "admins");
+}
+async function handleAdminMessage(m) {
+  const chatId = m.chat.id;
+  const userId = String(m.from.id);
+  const text = String(m.text || "").trim();
+  const send = (value) => telegram("sendMessage", { chat_id: chatId, text: value });
+  const task = takePending(userId);
+  if (task && text && !text.startsWith("/"))
+    return handlePendingAnswer(m, task, text);
+  if (!text) return;
+  if (/^\/cancel(?:@\w+)?(?:\s|$)/i.test(text)) {
+    clearPending(userId);
+    await send("Отменили.");
+    return showScreen(chatId, "main");
+  }
+  if (/^\/(id|myid)(?:@\w+)?(?:\s|$)/i.test(text)) {
+    await send(
+      `Ваш Telegram ID: ${userId}\n\nПередайте его тому, кто добавляет администраторов.`,
+    );
+    return;
+  }
+  const paid = /^\/paid\s+(\S+)/.exec(text);
+  if (paid) {
+    const result = markPaid(paid[1]);
+    await send(
+      result.error
+        ? "⚠️ " + result.error
+        : `✅ Заказ #${result.order.id} оплачен · начислено ${result.amount} БК-Коинов`,
+    );
+    return;
+  }
+  if (/^\/stoplist(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "stop");
+  if (/^\/orders(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "orders");
+  if (/^\/admins(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "admins");
+  if (/^\/addadmin(?:@\w+)?(?:\s|$)/i.test(text)) return commandAddAdmin(m, text);
+  if (/^\/deladmin(?:@\w+)?(?:\s|$)/i.test(text)) {
+    const arg = text.split(/\s+/).slice(1).join(" ").trim();
+    const target = m.reply_to_message?.from || m.forward_from;
+    const id = target
+      ? String(target.id)
+      : /^@/.test(arg)
+        ? findPersonByUsername(arg)?.id || ""
+        : arg;
+    if (!id) {
+      await send(
+        "Использование: /deladmin ID — или ответьте этой командой на сообщение человека. Список: /admins",
+      );
+      return;
+    }
+    const result = removeAdmin(id);
+    await send(result.error ? "⚠️ " + result.error : "🚫 Админ удалён");
+    if (!result.error) await showScreen(chatId, "admins");
+    return;
+  }
+  if (/^\/(menu|start)(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "main");
+  if (/^\/help(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "help");
+  await send("Не понял команду — открываю меню 👇");
+  await showScreen(chatId, "main");
+}
+async function handleCallback(q) {
+  const data = String(q.data || "");
+  const chatId = q.message?.chat?.id;
+  const messageId = q.message?.message_id;
+  const userId = String(q.from?.id || "");
+  const answer = (text, alert) =>
+    telegram("answerCallbackQuery", {
+      callback_query_id: q.id,
+      ...(text ? { text, show_alert: !!alert } : {}),
+    });
+  // The button under the order notification: coins move only here.
+  if (/^paid:/.test(data)) {
+    if (!isAdmin(userId))
+      return answer("Начислять коины может только администратор", true);
+    const result = markPaid(data.slice(5));
+    await answer(
+      result.error
+        ? result.error
+        : `Начислено ${result.amount} БК-Коинов за заказ #${result.order.id}`,
+    );
+    if (!result.error && messageId)
+      await telegram("editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text:
+          (q.message.text || "") +
+          `\n\n✅ Оплачен · начислено ${result.amount} БК-Коинов`,
+        reply_markup: { inline_keyboard: [] },
+      });
+    return;
+  }
+  if (!isAdmin(userId)) return answer("Это меню только для администраторов", true);
+  if (/^pay:/.test(data)) {
+    const result = markPaid(data.slice(4));
+    await answer(
+      result.error
+        ? result.error
+        : `Готово: +${result.amount} коинов по заказу #${result.order.id}`,
+    );
+    return showScreen(chatId, "pay", messageId);
+  }
+  if (/^rm:/.test(data)) {
+    const [, kind, id] = data.split(":");
+    const list = kind === "go" ? "go" : "stop";
+    const state = staffState();
+    const entry = state[list].find((x) => x.id === id);
+    if (!entry) {
+      await answer("Позиция уже убрана");
+      return showScreen(chatId, list, messageId);
+    }
+    state[list] = state[list].filter((x) => x.id !== id);
+    writeStaff(state);
+    notifyAdmins(
+      `${list === "stop" ? "✅ Снято со стопа" : "🏁 Убрано из гоу-листа"} (${String(entry.station).toLowerCase()}): «${entry.name}» — ${personName(q.from) || "админ"}`,
+    );
+    await answer(list === "stop" ? "Вернули в продажу" : "Убрано из списка");
+    return showScreen(chatId, list, messageId);
+  }
+  if (/^new:/.test(data)) {
+    const kind = data.slice(4) === "go" ? "go" : "stop";
+    setPending(userId, { kind, step: "name" });
+    await answer();
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text:
+        kind === "stop"
+          ? "Что поставить на стоп? Напишите название — позицию из меню или продукт: молоко, сироп, тарталетки."
+          : "Что добавить в гоу-лист? Напишите название — позицию из меню или что угодно: «пирог дня».",
+      reply_markup: {
+        inline_keyboard: [[{ text: "Отмена", callback_data: "cancel" }]],
+      },
+    });
+    return;
+  }
+  if (/^st:/.test(data)) {
+    const task = takePending(userId);
+    if (!task) {
+      await answer("Начните заново: меню → «Добавить в стоп»");
+      return showScreen(chatId, "main", messageId);
+    }
+    await finishListAdd(chatId, q.from, task, data.slice(3));
+    return;
+  }
+  if (/^add:/.test(data)) {
+    const id = data.slice(4);
+    const person = findPerson(id);
+    const result = addAdmin(id, {
+      name: person?.name,
+      username: person?.username,
+      addedBy: q.from.username || String(q.from.id),
+    });
+    await answer(result.error ? result.error : result.already ? "Уже админ" : "Админ добавлен", !!result.error);
+    if (!result.error && !result.already)
+      await telegram("sendMessage", {
+        chat_id: Number(id),
+        text:
+          "👋 Вас добавили администратором в бот «Большой Кофе».\n\n" +
+          "У вас есть всё: заказы, начисление коинов, стоп-листы и страница команды. " +
+          "Откройте меню — /menu",
+      });
+    return showScreen(chatId, "admins", messageId);
+  }
+  if (/^owner:/.test(data)) {
+    await answer(
+      "Это главный администратор из ADMIN_IDS — удалить его можно только в настройках хостинга",
+      true,
+    );
+    return;
+  }
+  if (/^del:/.test(data)) {
+    const result = removeAdmin(data.slice(4));
+    await answer(result.error ? result.error : "Админ удалён", !!result.error);
+    return showScreen(chatId, "admins", messageId);
+  }
+  if (data === "cancel") {
+    clearPending(userId);
+    await answer("Отменили");
+    return showScreen(chatId, "main", messageId);
+  }
+  if (data === "m:link") {
+    await answer();
+    return sendStaffLink(chatId);
+  }
+  if (/^m:/.test(data)) {
+    await answer();
+    return showScreen(chatId, data.slice(2), messageId);
+  }
+  await answer();
+}
 async function updateBot() {
   if (!token) return;
   let offset = 0;
@@ -427,198 +1115,29 @@ async function updateBot() {
       if (j.ok) {
         for (const u of j.result || []) {
           offset = u.update_id + 1;
-          // The button under the order notification is the only way coins
-          // ever move, and only an admin can press it.
-          const q = u.callback_query;
-          if (q && /^paid:/.test(String(q.data || ""))) {
-            const id = String(q.data).slice(5);
-            if (!admins.includes(String(q.from.id))) {
-              await telegram("answerCallbackQuery", {
-                callback_query_id: q.id,
-                text: "Начислять коины может только администратор",
-              });
+          // One broken update must never stop the bot.
+          try {
+            if (u.callback_query) {
+              await handleCallback(u.callback_query);
               continue;
             }
-            const result = markPaid(id);
-            await telegram("answerCallbackQuery", {
-              callback_query_id: q.id,
-              text: result.error
-                ? result.error
-                : `Начислено ${result.amount} БК-Коинов за заказ #${result.order.id}`,
-            });
-            if (!result.error && q.message)
-              await telegram("editMessageText", {
-                chat_id: q.message.chat.id,
-                message_id: q.message.message_id,
-                text:
-                  (q.message.text || "") +
-                  `\n\n✅ Оплачен · начислено ${result.amount} БК-Коинов`,
-                reply_markup: JSON.stringify({ inline_keyboard: [] }),
-              });
-            continue;
-          }
-          const m = u.message;
-          const isStart = /^\/start(?:@\w+)?(?:\s|$)/i.test(String(m?.text || ""));
-          const isAdminChat = m && admins.includes(String(m.chat.id));
-          if (m && !isAdminChat && m.chat?.type === "private" && isStart) {
-            await welcomeGuest(m.chat.id);
-            continue;
-          }
-          if (m && isAdminChat) {
-            // Text alternative to the button: /paid <номер заказа>.
-            const paid = /^\/paid\s+(\S+)/.exec(m.text || "");
-            if (paid) {
-              const result = markPaid(paid[1]);
-              await telegram("sendMessage", {
-                chat_id: m.chat.id,
-                text: result.error
-                  ? result.error
-                  : `✅ Заказ #${result.order.id} оплачен · начислено ${result.amount} БК-Коинов`,
-              });
+            const m = u.message;
+            if (!m?.from || m.from.is_bot) continue;
+            // Whoever writes to the bot becomes pickable in «Добавить админа».
+            rememberPerson(m.from);
+            if (m.reply_to_message?.from) rememberPerson(m.reply_to_message.from);
+            if (m.forward_from) rememberPerson(m.forward_from);
+            if (isAdmin(m.from.id)) {
+              await handleAdminMessage(m);
               continue;
             }
-            // Team/account commands are intentionally restricted to private
-            // chats whose numeric chat id is in ADMIN_IDS; generated passwords
-            // must never be exposed in a staff group.
-            const team = /^\/(team|adduser|newpass|deluser|setrole|grant|roles)(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(
-              m.text || "",
-            );
-            if (team) {
-              const command = team[1].toLowerCase();
-              const reply = (text) =>
-                telegram("sendMessage", { chat_id: m.chat.id, text });
-              const state = staffState();
-              const args = String(team[2] || "").trim().split(/\s+/).filter(Boolean);
-              if (command === "roles") {
-                await reply(
-                  "Права по ролям:\n" +
-                    staffRoles
-                      .map((role) => `· ${role} — ${roleDescription(role)}`)
-                      .join("\n") +
-                    "\n\nПолные команды бота доступны только ID из ADMIN_IDS.",
-                );
-                continue;
-              }
-              if (command === "team") {
-                await reply(
-                  (state.accounts.length
-                    ? "👥 Команда:\n" +
-                      state.accounts
-                        .map(
-                          (a) =>
-                            `· ${a.login} — ${a.name} (${a.role}) · ${roleDescription(a.role)}`,
-                        )
-                        .join("\n")
-                    : "Аккаунтов пока нет.") +
-                    "\n\nКоманды:\n/adduser логин Имя роль — создать аккаунт и назначить права\n/setrole логин роль — изменить роль и права\n/grant логин роль — то же самое\n/newpass логин — новый пароль\n/deluser логин — закрыть доступ\n/roles — описание всех ролей\n\nРоли: " +
-                    staffRoles.join(", ") +
-                    "\n\nСтраница команды: /staff на адресе приложения — стоп-листы, гоу-листы, техкарты, смена и вопросы.",
-                );
-                continue;
-              }
-              if (command === "adduser") {
-                const login = args.shift() || "";
-                let role = "";
-                if (args.length) {
-                  const candidate = normalizeStaffRole(args[args.length - 1]);
-                  if (staffRoles.includes(candidate)) role = args.pop();
-                }
-                const made = createAccount(
-                  state,
-                  login,
-                  args.join(" "),
-                  role,
-                  m.from.username || m.from.id,
-                );
-                if (made.error) {
-                  await reply("⚠️ " + made.error);
-                  continue;
-                }
-                writeStaff(state);
-                await reply(
-                  `✅ Доступ выдан\nЛогин: ${made.login}\nРоль: ${made.role}\nПрава: ${roleDescription(made.role)}\nПароль: ${made.password}\n\nПерешли данные сотруднику лично. Вход — страница /staff на адресе приложения. Пароль показан один раз: потеряется — /newpass ${made.login}.`,
-                );
-                continue;
-              }
-              if (command === "setrole" || command === "grant") {
-                const login = String(args[0] || "").toLowerCase();
-                const role = normalizeStaffRole(args[1]);
-                const account = state.accounts.find((a) => a.login === login);
-                if (!login || !staffRoles.includes(role)) {
-                  await reply(
-                    `Использование: /${command} логин роль\nРоли: ${staffRoles.join(", ")}`,
-                  );
-                  continue;
-                }
-                if (!account) {
-                  await reply(`Аккаунт «${login}» не найден. Список: /team`);
-                  continue;
-                }
-                account.role = role;
-                for (const [t, session] of Object.entries(state.sessions))
-                  if (session.login === login) delete state.sessions[t];
-                writeStaff(state);
-                await reply(
-                  `✅ Права обновлены: ${account.name} (${login})\nРоль: ${role}\nПрава: ${roleDescription(role)}\nСотруднику нужно войти заново.`,
-                );
-                continue;
-              }
-              const login = String(args[0] || "").toLowerCase();
-              const account = state.accounts.find((a) => a.login === login);
-              if (!account) {
-                await reply(`Аккаунт «${login || "?"}» не найден. Список: /team`);
-                continue;
-              }
-              if (command === "newpass") {
-                const password = generatePassword();
-                account.salt = crypto.randomBytes(8).toString("hex");
-                account.hash = hashPassword(password, account.salt);
-                for (const [t, session] of Object.entries(state.sessions))
-                  if (session.login === login) delete state.sessions[t];
-                writeStaff(state);
-                await reply(
-                  `🔑 Новый пароль для ${account.name} (${login}): ${password}\nСтарые входы на устройствах сброшены.`,
-                );
-                continue;
-              }
-              state.accounts = state.accounts.filter((a) => a.login !== login);
-              for (const [t, session] of Object.entries(state.sessions))
-                if (session.login === login) delete state.sessions[t];
-              writeStaff(state);
-              await reply(`🚫 Доступ закрыт: ${account.name} (${login})`);
-              continue;
-            }
-            // The current stop list right in the chat: /stoplist.
-            if (/^\/stoplist/.test(m.text || "")) {
-              const stop = staffState().stop;
-              await telegram("sendMessage", {
-                chat_id: m.chat.id,
-                text: stop.length
-                  ? "🛑 Стоп-лист:\n" +
-                    stop
-                      .map(
-                        (x) =>
-                          `· ${x.name} (${x.station.toLowerCase()})${x.by ? " — " + x.by : ""}`,
-                      )
-                      .join("\n")
-                  : "Стоп-лист пуст — всё в продаже",
-              });
-              continue;
-            }
-            if (/^\/(start|orders)(?:@\w+)?(?:\s|$)/i.test(m.text || "")) {
-              const orders = read().slice(-8).reverse();
-              await telegram("sendMessage", {
-                chat_id: m.chat.id,
-                text: orders.length
-                  ? orders
-                      .map(
-                        (o) =>
-                          `#${o.id} · ${o.status}${o.credited ? ` · +${o.coinsEarned} коинов` : ""}\n${o.customer.name} · ${o.customer.phone}\n${o.items.map((i) => `${lineTitle(i)} × ${i.qty}`).join(", ")}\n${o.type === "here" ? "В кофейне" : "К выдаче"} · ${o.branch}\n${money(o.total)}`,
-                      )
-                      .join("\n\n")
-                  : "Заказов пока нет",
-              });
-            }
+            if (
+              m.chat?.type === "private" &&
+              /^\/(start|menu|help)(?:@\w+)?(?:\s|$)/i.test(String(m.text || ""))
+            )
+              await welcomeGuest(m.chat.id);
+          } catch (e) {
+            console.error("Update:", e.message);
           }
         }
         if (!j.result?.length) await new Promise((resolve) => setTimeout(resolve, 500));
@@ -650,23 +1169,25 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
   if (url.pathname === "/api/menu") return json(res, 200, publicMenu());
-  // Team endpoints. Access is personal: /api/staff/login exchanges a login
-  // and password issued by the admin in the bot for a session token; every
-  // other call carries that token in the X-Staff-Token header. Every change
-  // is signed with the account's name automatically.
+  // Team endpoints. There is no login form: the page is opened from the bot,
+  // Telegram signs who opened it, and a one-time link covers a plain browser.
+  // Everything else carries the session token in the X-Staff-Token header,
+  // and every change is signed with the name from that session.
   if (url.pathname.startsWith("/api/staff")) {
     if (url.pathname === "/api/staff/state" && req.method === "GET") {
       const state = staffState();
-      const account = sessionAccount(state, req.headers["x-staff-token"]);
+      const account = staffSessionAccount(state, req.headers["x-staff-token"]);
       if (!account)
-        return json(res, 401, { error: "Войди со своим логином и паролем" });
+        return json(res, 401, {
+          error: "Откройте страницу из бота — вход по Telegram",
+        });
       return json(res, 200, {
-        ...staffPublicState(state, account),
+        ...staffPublicState(state),
         me: {
           login: account.login,
           name: account.name,
           role: account.role,
-          permissions: staffPermissions(account.role),
+          permissions: fullPermissions,
         },
       });
     }
@@ -683,45 +1204,64 @@ const server = http.createServer(async (req, res) => {
     } catch {
       return json(res, 400, { error: "Некорректный запрос" });
     }
-    if (url.pathname === "/api/staff/login") {
-      const login = String(body.login || "")
-        .toLowerCase()
-        .trim()
-        .slice(0, 40);
-      const password = String(body.password || "").slice(0, 100);
-      if (!login || !password)
-        return json(res, 400, { error: "Укажи логин и пароль" });
-      if (!loginAllowed(login))
-        return json(res, 429, {
-          error: "Слишком много попыток — подожди 10 минут",
+    // The /staff page opened inside Telegram: initData is signed by Telegram
+    // with the bot token, so it proves the user without any password.
+    if (url.pathname === "/api/staff/telegram") {
+      const user = telegramUserFromInitData(String(body.initData || ""));
+      if (!user?.id)
+        return json(res, 401, {
+          error:
+            "Не удалось подтвердить Telegram — откройте страницу из бота",
+        });
+      if (!isAdmin(user.id))
+        return json(res, 403, {
+          error:
+            "Вы не администратор. Доступ выдаёт администратор в боте: меню → «Админы»",
         });
       const state = staffState();
-      const account = state.accounts.find((a) => a.login === login);
-      const ok = account
-        ? hashPassword(password, account.salt) === account.hash
-        : login === "admin" && staffPin && password === staffPin;
-      if (!ok) {
-        loginAttempts[login].count++;
-        return json(res, 403, {
-          error: "Неверный логин или пароль. Доступ выдаёт управляющий в боте",
-        });
-      }
-      const token = createSession(state, login);
+      const value = createStaffSession(state, user.id, personName(user));
       writeStaff(state);
-      const me = account || { login: "admin", name: "Админ", role: "админ" };
       return json(res, 200, {
         ok: true,
-        token,
+        token: value,
         me: {
-          login: me.login,
-          name: me.name,
-          role: me.role,
-          permissions: staffPermissions(me.role),
+          login: "tg:" + user.id,
+          name: personName(user) || "Админ",
+          role: "админ",
+          permissions: fullPermissions,
+        },
+      });
+    }
+    // The one-time link the bot prints for a browser outside Telegram.
+    if (url.pathname === "/api/staff/key") {
+      const key = String(body.key || "").slice(0, 64);
+      const link = staffLinks[key];
+      if (!link || link.exp < Date.now())
+        return json(res, 401, {
+          error: "Ссылка устарела — попросите новую в боте: меню → «Ссылка на /staff»",
+        });
+      delete staffLinks[key];
+      const state = staffState();
+      const admin = adminList().find((a) => a.id === String(link.by));
+      const value = createStaffSession(
+        state,
+        admin ? admin.id : link.by,
+        admin?.name || "Админ",
+      );
+      writeStaff(state);
+      return json(res, 200, {
+        ok: true,
+        token: value,
+        me: {
+          login: "tg:" + (admin ? admin.id : link.by),
+          name: admin?.name || "Админ",
+          role: "админ",
+          permissions: fullPermissions,
         },
       });
     }
     const state = staffState();
-    const account = sessionAccount(state, req.headers["x-staff-token"]);
+    const account = staffSessionAccount(state, req.headers["x-staff-token"]);
     if (!account)
       return json(res, 401, { error: "Сессия истекла — войди заново" });
     if (url.pathname === "/api/staff/logout") {
@@ -740,11 +1280,7 @@ const server = http.createServer(async (req, res) => {
         .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
         .trim()
         .slice(0, n);
-    const permissions = staffPermissions(account.role);
     const by = account.name;
-    const notifyAdmins = (text) => {
-      for (const id of admins) telegram("sendMessage", { chat_id: id, text });
-    };
     try {
       if (url.pathname === "/api/staff/stop" || url.pathname === "/api/staff/go") {
         const list = url.pathname.endsWith("stop") ? "stop" : "go";
@@ -752,19 +1288,15 @@ const server = http.createServer(async (req, res) => {
         if (body.action === "remove") {
           const entry = state[list].find((x) => x.id === String(body.id || ""));
           if (!entry) return json(res, 404, { error: "Запись не найдена" });
-          if (!permissions.manageStations.includes(entry.station))
-            return json(res, 403, { error: "Нет прав менять список этой станции" });
           state[list] = state[list].filter((x) => x !== entry);
           writeStaff(state);
           notifyAdmins(
             `${list === "stop" ? "✅ Снято со стопа" : "🏁 Убрано из гоу-листа"} (${entry.station}): «${entry.name}»${by ? " — " + by : ""}`,
           );
-          return json(res, 200, staffPublicState(staffState(), account));
+          return json(res, 200, staffPublicState(staffState()));
         }
         const station = allStations.includes(body.station) ? body.station : "";
         if (!station) return json(res, 400, { error: "Укажи станцию: Кухня или Бар" });
-        if (!permissions.manageStations.includes(station))
-          return json(res, 403, { error: "У тебя нет прав на списки этой станции" });
         const itemId = clean(body.itemId, 80);
         const typedName = clean(body.name, 80);
         const product = itemId
@@ -795,11 +1327,9 @@ const server = http.createServer(async (req, res) => {
         notifyAdmins(
           `${list === "stop" ? "🛑" : "📣"} ${label} (${station.toLowerCase()}): «${name}»${by ? " — " + by : ""}`,
         );
-        return json(res, 200, staffPublicState(staffState(), account));
+        return json(res, 200, staffPublicState(staffState()));
       }
       if (url.pathname === "/api/staff/recipes") {
-        if (!permissions.recipes)
-          return json(res, 403, { error: "Технологические карты доступны поварам и администраторам" });
         const itemId = clean(body.itemId, 80);
         const product = menu.find((p) => p.id === itemId && p.category === "Еда");
         if (!product)
@@ -810,22 +1340,20 @@ const server = http.createServer(async (req, res) => {
           delete state.recipes[itemId];
           writeStaff(state);
           notifyAdmins(`🧾 Техкарта удалена: «${product.name}»${by ? " — " + by : ""}`);
-          return json(res, 200, staffPublicState(staffState(), account));
+          return json(res, 200, staffPublicState(staffState()));
         }
         const text = cleanBlock(body.text, 2000);
         if (!text) return json(res, 400, { error: "Добавь алгоритм приготовления" });
         state.recipes[itemId] = { text, by, at: new Date().toISOString() };
         writeStaff(state);
         notifyAdmins(`🧾 Техкарта обновлена: «${product.name}»${by ? " — " + by : ""}`);
-        return json(res, 200, staffPublicState(staffState(), account));
+        return json(res, 200, staffPublicState(staffState()));
       }
       if (url.pathname === "/api/staff/shift") {
-        if (!permissions.shift)
-          return json(res, 403, { error: "Нет прав на управление сменой" });
         if (body.action === "remove") {
           state.shift = state.shift.filter((x) => x.id !== String(body.id || ""));
           writeStaff(state);
-          return json(res, 200, staffPublicState(staffState(), account));
+          return json(res, 200, staffPublicState(staffState()));
         }
         const name = clean(body.name, 60);
         if (!name) return json(res, 400, { error: "Укажи имя" });
@@ -842,22 +1370,20 @@ const server = http.createServer(async (req, res) => {
           at: new Date().toISOString(),
         });
         writeStaff(state);
-        return json(res, 200, staffPublicState(staffState(), account));
+        return json(res, 200, staffPublicState(staffState()));
       }
       if (url.pathname === "/api/staff/board") {
-        if (!permissions.board)
-          return json(res, 403, { error: "Нет прав на внутренние вопросы" });
         if (body.action === "remove") {
           state.board = state.board.filter((x) => x.id !== String(body.id || ""));
           writeStaff(state);
-          return json(res, 200, staffPublicState(staffState(), account));
+          return json(res, 200, staffPublicState(staffState()));
         }
         if (body.action === "toggle") {
           const entry = state.board.find((x) => x.id === String(body.id || ""));
           if (!entry) return json(res, 404, { error: "Запись не найдена" });
           entry.done = !entry.done;
           writeStaff(state);
-          return json(res, 200, staffPublicState(staffState(), account));
+          return json(res, 200, staffPublicState(staffState()));
         }
         const text = clean(body.text, 500);
         if (!text) return json(res, 400, { error: "Пустое сообщение" });
@@ -869,7 +1395,7 @@ const server = http.createServer(async (req, res) => {
           done: false,
         });
         writeStaff(state);
-        return json(res, 200, staffPublicState(staffState(), account));
+        return json(res, 200, staffPublicState(staffState()));
       }
     } catch (e) {
       return json(res, 400, { error: "Некорректный запрос" });
@@ -919,7 +1445,7 @@ const server = http.createServer(async (req, res) => {
         for (const k of Object.keys(recentErrors))
           if (now - recentErrors[k] >= 60000) delete recentErrors[k];
       recentErrors[key] = now;
-      for (const id of admins)
+      for (const id of adminIds())
         telegram("sendMessage", {
           chat_id: id,
           text: `⚠️ Ошибка в приложении\n${message}\n\nРаздел: ${
@@ -977,7 +1503,7 @@ const server = http.createServer(async (req, res) => {
       const preparation = orderPreparationMessages(order);
       const orderText = `☕ НОВЫЙ ЗАКАЗ #${order.id}\n${order.type === "here" ? "📍 В кофейне" : "🛍 С собой"} · ${order.branch}\n👤 ${order.customer.name} · ${order.customer.phone}\n\n${items.map((i) => `${lineTitle(i)} × ${i.qty} — ${money(i.price * i.qty)}`).join("\n")}\n\nИтого: ${money(total)}\nБК-Коинов после оплаты: ${order.coinsEarned}${preparation.length ? "\n\n👨‍🍳 Алгоритмы действий — следующим сообщением." : ""}`;
       const orderChunks = splitTelegramText(orderText);
-      for (const id of admins) {
+      for (const id of adminIds()) {
         (async () => {
           for (let index = 0; index < orderChunks.length; index++) {
             await telegram("sendMessage", {
@@ -1030,7 +1556,8 @@ const server = http.createServer(async (req, res) => {
   }
   if (pathname === "/") pathname = "/index.html";
   // The team page lives at /staff. The page itself is public like the rest of
-  // the interface; everything on it hides behind the PIN in the staff API.
+  // the interface; everything on it hides behind the staff API, which only
+  // lets confirmed admins in.
   if (pathname === "/staff") pathname = "/staff.html";
   // menu.json is public on purpose: the client can load the catalogue without
   // the API, so the menu works on a static host or while the server restarts.

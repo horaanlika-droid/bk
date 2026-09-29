@@ -192,3 +192,93 @@ test(
     assert.deepEqual(app.errors, []);
   },
 );
+
+// The team page has no login form any more: outside Telegram it asks to be
+// opened from the bot, and a one-time key from the bot signs the device in.
+const staffPermissions = {
+  viewStations: ["Кухня", "Бар"],
+  manageStations: ["Кухня", "Бар"],
+  recipes: true,
+  shift: true,
+  board: true,
+};
+async function bootStaff(hash = "") {
+  const [{ JSDOM, VirtualConsole }, html, source] = await Promise.all([
+    Promise.resolve(jsdom),
+    readFile(new URL("staff.html", root), "utf8"),
+    readFile(new URL("staff.js", root), "utf8"),
+  ]);
+  const errors = [];
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on("jsdomError", (err) => {
+    if (!/Not implemented/.test(err.message)) errors.push(err.message);
+  });
+  const dom = new JSDOM(
+    // Telegram's SDK is not reachable from here: a page without initData is
+    // exactly the case being tested.
+    html.replace(/<script src="https:\/\/telegram[^"]*"><\/script>/, ""),
+    { url: "http://localhost/staff" + hash, runScripts: "dangerously", virtualConsole },
+  );
+  const { window } = dom;
+  const calls = [];
+  window.fetch = async (url, options = {}) => {
+    const path = String(url);
+    const body = options.body ? JSON.parse(options.body) : {};
+    calls.push({ path, body });
+    const json = async (value) => ({ ok: true, status: 200, json: async () => value });
+    if (path === "/api/staff/key" && body.key === "good-key")
+      return json({
+        ok: true,
+        token: "session-token",
+        me: { name: "Босс", role: "админ", permissions: staffPermissions },
+      });
+    if (
+      path === "/api/staff/state" &&
+      options.headers &&
+      options.headers["X-Staff-Token"] === "session-token"
+    )
+      return json({
+        stop: [],
+        go: [],
+        shift: [],
+        board: [],
+        recipes: {},
+        menu: [],
+        permissions: staffPermissions,
+        me: { name: "Босс", role: "админ", permissions: staffPermissions },
+      });
+    return { ok: false, status: 401, json: async () => ({ error: "нет доступа" }) };
+  };
+  window.addEventListener("error", (e) => errors.push("error: " + e.message));
+  window.addEventListener("unhandledrejection", (e) =>
+    errors.push("rejection: " + e.reason),
+  );
+  window.eval(source);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  // The page polls for updates: the window has to be closed afterwards or the
+  // timer keeps the test process alive.
+  return { window, doc: window.document, calls, errors, close: () => window.close() };
+}
+
+test("the team page opens from the bot instead of asking for a password", { skip: !jsdom }, async () => {
+  const plain = await bootStaff();
+  const login = plain.doc.querySelector("#login");
+  assert.equal(login.hidden, false, "the visitor is told how to get in");
+  assert.equal(plain.doc.querySelector("#panel").hidden, true, "no data is shown");
+  assert.match(login.textContent.replace(/\s+/g, " "), /Откройте страницу из бота/);
+  assert.equal(plain.doc.querySelector("#loginForm"), null, "no password form is left");
+  assert.deepEqual(plain.errors, []);
+  plain.close();
+  // The one-time link from the bot signs the device in on its own.
+  const linked = await bootStaff("#key=good-key");
+  assert.equal(linked.doc.querySelector("#panel").hidden, false);
+  assert.equal(linked.doc.querySelector("#login").hidden, true);
+  assert.match(linked.doc.querySelector("#me").textContent, /Босс/);
+  assert.equal(
+    linked.window.location.hash,
+    "",
+    "the used key is wiped from the address bar",
+  );
+  assert.deepEqual(linked.errors, []);
+  linked.close();
+});
