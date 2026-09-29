@@ -397,6 +397,7 @@ function menuResults() {
       // made only in flatbread, then the kitchen card — breakfasts, salads,
       // soups and mains — and finally nuggets and sauces.
       const parts = [
+        ...kitchen,
         {
           title: "Сэндвичи на твой выбор",
           note: "Готовим в лепёшке, хлебе или булочке — выберешь при добавлении",
