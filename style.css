@@ -2705,3 +2705,15 @@ select {
   resize: vertical;
   margin-bottom: 14px;
 }
+
+.price-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.price-wrap .weight {
+  color: #777;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+}

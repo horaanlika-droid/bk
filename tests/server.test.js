@@ -59,7 +59,7 @@ after(async () => {
 
 test("menu and public assets load with correct MIME types", async () => {
   const menu = await (await fetch(base + "/api/menu")).json();
-  assert.equal(menu.length, 97);
+  assert.equal(menu.length, 122);
   assert.equal(new Set(menu.map((item) => item.id)).size, menu.length);
   for (const item of menu.filter((p) => p.category !== "Еда"))
     assert.ok(item.art, "drink has an illustration: " + item.id);
