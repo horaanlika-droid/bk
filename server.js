@@ -48,7 +48,12 @@ const buildInfo = () => ({
 // and the cart keep working on a host without a running server. Breads are
 // stored as {id, name}, extras as {id, name, price, group}: the order is priced
 // from this same data, so the browser can never invent a price.
-const menu = JSON.parse(fs.readFileSync(path.join(root, "menu.json"), "utf8"));
+let menu = JSON.parse(fs.readFileSync(path.join(root, "menu.json"), "utf8"));
+const menuFile = path.join(root, "menu.json");
+function writeMenu(newMenu) {
+  fs.writeFileSync(menuFile, JSON.stringify(newMenu, null, 2));
+  menu = newMenu;
+}
 // ---------------------------------------------------------------------------
 // Admins. The whole access model is a numeric Telegram id: the ids from
 // ADMIN_IDS are the owners, everybody else is added by an admin with the
@@ -333,13 +338,26 @@ const stoppedIds = () =>
       .stop.map((entry) => entry.itemId)
       .filter(Boolean),
   );
-// The customer menu carries the stop flag: the card shows «Стоп», the add
-// button is off, and orderLine below refuses the item at checkout too.
+
+const goIds = () =>
+  new Set(
+    readStaff()
+      .go.map((entry) => entry.itemId)
+      .filter(Boolean),
+  );
+
+// The customer menu carries the stop/go flags: stop shows «Стоп» and disables add,
+// go shows a highlight. orderLine refuses stopped items at checkout.
 const publicMenu = () => {
   const stopped = stoppedIds();
-  return stopped.size
-    ? menu.map((p) => (stopped.has(p.id) ? { ...p, stop: true } : p))
-    : menu;
+  const go = goIds();
+  if (!stopped.size && !go.size) return menu;
+  return menu.map((p) => {
+    const flags = {};
+    if (stopped.has(p.id)) flags.stop = true;
+    if (go.has(p.id)) flags.go = true;
+    return Object.keys(flags).length ? { ...p, ...flags } : p;
+  });
 };
 // A compact catalogue for the staff page's item picker.
 const menuNames = () =>
@@ -441,14 +459,21 @@ const coinsKey = (customer) => {
   const uid = String(customer?.telegramId || "").replace(/\D/g, "");
   return phone ? "phone:" + phone : uid ? "tg:" + uid : "";
 };
-const plannedCoins = (total) => Math.floor(total * 0.05);
+const plannedCoins = (items) => {
+  const drinkItems = items.filter(item => {
+    const product = menu.find(p => p.id === item.id);
+    return product && product.category !== 'Еда';
+  });
+  const drinkTotal = drinkItems.reduce((sum, item) => sum + item.price * item.qty, 0);
+  return Math.floor(drinkTotal * 0.05);
+};
 // Coins move only here: the admin taps the button under the order in the bot
 // after the customer has actually paid. Nothing in the HTTP API can credit.
 function creditCoins(order) {
   const key = coinsKey(order.customer);
   if (!key) return 0;
   const balances = readCoins();
-  const amount = plannedCoins(order.total);
+  const amount = plannedCoins(order.items);
   const entry = balances[key] || { coins: 0, history: [] };
   entry.coins += amount;
   entry.history.unshift({
@@ -527,7 +552,8 @@ const notifyAdmins = (text) => {
 // A screen is one message: a text and a keyboard. The bot edits the current
 // message when it can, so a shift of button presses leaves one clean message
 // behind instead of a wall of them.
-function screenMain() {
+function screenMain(userId) {
+  const isOwner = isOwnerAdmin(userId);
   return {
     text:
       "☕ Большой Кофе — меню администратора\n\n" +
@@ -546,6 +572,12 @@ function screenMain() {
         { text: "👥 Админы", callback_data: "m:admins" },
         { text: "➕ Добавить админа", callback_data: "m:addadmin" },
       ],
+      ...(isOwner
+        ? [
+            [{ text: "📝 Управление меню", callback_data: "m:menu" }],
+            [{ text: "🎵 Техкарты (Рецепты)", callback_data: "m:recipes" }],
+          ]
+        : []),
       ...(staffUrl
         ? [
             [
@@ -684,6 +716,141 @@ function screenHelp() {
     keyboard: [backRow],
   };
 }
+
+// ---------- Menu management screens (owner only) ----------
+function screenMenu() {
+  if (!isOwnerAdmin(chatId)) {
+    return {
+      text: "⛔ Только главный администратор (ADMIN_IDS) может редактировать меню.",
+      keyboard: [backRow],
+    };
+  }
+  const categories = ["Кофе", "Чай", "Напитки", "Еда", "Десерты"];
+  return {
+    text:
+      "📋 Управление меню\n\n" +
+      "Выберите действие:",
+    keyboard: [
+      [{ text: "📄 Список позиций", callback_data: "m:menulist" }],
+      [{ text: "➕ Добавить позицию", callback_data: "m:menuadd" }],
+      [{ text: "◀️ В меню", callback_data: "m:main" }],
+    ],
+  };
+}
+
+function screenMenuList() {
+  if (!isOwnerAdmin(chatId)) {
+    return { text: "⛔ Только главный администратор.", keyboard: [backRow] };
+  }
+  const lines = menu
+    .slice(0, 30)
+    .map(
+      (p) =>
+        `· ${p.name} — ${money(p.price)} · ${p.category}${p.group ? " · " + p.group : ""} · id: ${p.id}`,
+    );
+  return {
+    text:
+      "📄 Позиции меню (показано до 30):\n\n" +
+      (lines.length ? lines.join("\n") : "Меню пусто") +
+      (menu.length > 30 ? `\n\n… и ещё ${menu.length - 30} позиций` : ""),
+    keyboard: [
+      ...menu.slice(0, 20).map((p) => [
+        {
+          text: `✏️ ${p.name} (${money(p.price)})`,
+          callback_data: `menuedit:${p.id}`,
+        },
+      ]),
+      [{ text: "◀️ К меню", callback_data: "m:menu" }],
+      [{ text: "➕ Добавить позицию", callback_data: "m:menuadd" }],
+    ],
+  };
+}
+
+function screenMenuEdit(itemId) {
+  if (!isOwnerAdmin(chatId)) {
+    return { text: "⛔ Только главный администратор.", keyboard: [backRow] };
+  }
+  const item = menu.find((p) => p.id === itemId);
+  if (!item) {
+    return { text: "⚠️ Позиция не найдена", keyboard: [{ text: "◀️ К списку", callback_data: "m:menulist" }] };
+  }
+  const isFood = item.category === "Еда";
+  const hasBreads = Array.isArray(item.breads) && item.breads.length > 0;
+  const extrasCount = Array.isArray(item.extras) ? item.extras.length : 0;
+  return {
+    text:
+      `✏️ Редактирование: ${item.name}\n\n` +
+      `ID: ${item.id}\n` +
+      `Категория: ${item.category}\n` +
+      `Цена: ${money(item.price)}\n` +
+      `Группа: ${item.group || "—"}\n` +
+      `Описание: ${item.desc || "—"}\n` +
+      (isFood ? `Хлеб: ${hasBreadChoice(item) ? "на выбор" : "только " + (item.breads?.[0]?.name || "—")}\n` : "") +
+      `Добавки: ${extrasCount}\n` +
+      `Фото: ${item.art || "нет"}`,
+    keyboard: [
+      [{ text: "🗑️ Удалить", callback_data: `menudel:${itemId}` }],
+      [{ text: "◀️ К списку", callback_data: "m:menulist" }],
+    ],
+  };
+}
+
+function screenMenuAdd() {
+  if (!isOwnerAdmin(chatId)) {
+    return { text: "⛔ Endast huvudadministratör.", keyboard: [backRow] };
+  }
+  setPending(userId, { kind: "menuadd", step: "name" });
+  return {
+    text:
+      "➕ Lägg till menyartikel\n\n" +
+      "Skriv namnet på positionen:",
+    keyboard: [[{ text: "Avbryt", callback_data: "cancel" }]],
+  };
+}
+
+// --- Технологические карты (рецепты) в боте -------------------------------
+function screenRecipes() {
+  if (!isOwnerAdmin(chatId)) {
+    return { text: "⛔ Только главный администратор.", keyboard: [backRow] };
+  }
+  const state = staffState();
+  const dishes = (state.menu || []).filter((item) => item.category === "Еда");
+  const recipes = state.recipes || {};
+  
+  if (!dishes.length)
+    return {
+      text: "🎵 В меню пока нет блюд кухни.",
+      keyboard: [[{ text: "◀️ В меню", callback_data: "m:main" }]],
+    };
+  
+  const filled = dishes.filter((item) => recipes[item.id] && recipes[item.id].text).length;
+  const lines = dishes.map((item) => {
+    const recipe = recipes[item.id];
+    const status = recipe && recipe.text ? "✅" : "⬜";
+    return `${status} ${item.name} ${item.group ? "· " + item.group : ""}`;
+  });
+  
+  return {
+    text:
+      `🎵 Техкарты (Рецепты)\\n\\n` +
+      `Заполнено: ${filled} из ${dishes.length}\\n\\n` +
+      lines.join("\\n") +
+      `\\n\\nНажмите на блюдо, чтобы посмотреть/редактировать техкарту.`,
+    keyboard: [
+      ...dishes.slice(0, 20).map((item) => [
+        {
+          text: `${recipes[item.id] && recipes[item.id].text ? "✅" : "⬜"} ${item.name} ${item.group ? "· " + item.group : ""}`,
+          callback_data: `recipeedit:${item.id}`,
+        },
+      ]),
+      [{ text: "◀️ В меню", callback_data: "m:main" }],
+    ],
+  };
+}
+
+// Helper functions for menu editing
+
+
 const screens = {
   main: screenMain,
   orders: screenOrders,
@@ -692,6 +859,11 @@ const screens = {
   go: () => screenList("go"),
   admins: screenAdmins,
   addadmin: screenAddAdmin,
+  menu: screenMenu,
+  menulist: screenMenuList,
+  menuedit: screenMenuEdit,
+  menuadd: screenMenuAdd,
+  recipes: screenRecipes,
   help: screenHelp,
 };
 async function showScreen(chatId, name, messageId) {
@@ -815,8 +987,32 @@ async function handlePendingAnswer(m, task, text) {
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .trim()
     .slice(0, 60);
+  
+  // --- Stop/Go List Station Selection ---
   if (task.step === "station")
     return finishListAdd(chatId, m.from, task, name || " ");
+  
+  // --- Menu Add Flow (Owner Admin Only) ---
+  if (task.kind === "menuadd") {
+    if (!isOwnerAdmin(userId)) {
+      clearPending(userId);
+      await telegram("sendMessage", { chat_id: chatId, text: "⛔ Только главный администратор." });
+      return showScreen(chatId, "main");
+    }
+    return handleMenuAddPending(chatId, userId, task, name);
+  }
+  
+  // --- Recipe Edit Flow (Owner Admin Only) ---
+  if (task.kind === "recipeedit") {
+    if (!isOwnerAdmin(userId)) {
+      clearPending(userId);
+      await telegram("sendMessage", { chat_id: chatId, text: "⛔ Только главный администратор." });
+      return showScreen(chatId, "main");
+    }
+    return handleRecipeEditPending(chatId, userId, task, name);
+  }
+  
+  // --- Stop/Go List Name Input ---
   if (!name) {
     await telegram("sendMessage", {
       chat_id: chatId,
@@ -842,6 +1038,116 @@ async function handlePendingAnswer(m, task, text) {
       ],
     },
   });
+}
+
+// --- Menu Add Pending Handler (Multi-step: Name -> Category -> Price -> Desc -> Group -> Breads -> Extras) ---
+async function handleMenuAddPending(chatId, userId, task, input) {
+  const clean = (v, n) => String(v || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, n);
+  const cleanBlock = (v, n) => String(v || "").replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim().slice(0, n);
+  
+  if (task.step === "name") {
+    if (!input) { await ask(chatId, "Название не может быть пустым. Введите название:"); return; }
+    setPending(userId, { ...task, step: "category", name: clean(input, 100) });
+    await ask(chatId, "Категория (например: Еда, Напитки, Закуски):");
+    return;
+  }
+  
+  if (task.step === "category") {
+    if (!input) { await ask(chatId, "Категория обязательна. Введите категорию:"); return; }
+    setPending(userId, { ...task, step: "price", category: clean(input, 40) });
+    await ask(chatId, "Цена (число, например: 150):");
+    return;
+  }
+  
+  if (task.step === "price") {
+    const price = Number(input);
+    if (isNaN(price) || price <= 0) { await ask(chatId, "Неверная цена. Введите число больше 0:"); return; }
+    setPending(userId, { ...task, step: "desc", price: price });
+    await ask(chatId, "Описание (или '-' чтобы пропустить):");
+    return;
+  }
+  
+  if (task.step === "desc") {
+    const desc = input === "-" ? "" : cleanBlock(input, 500);
+    setPending(userId, { ...task, step: "group", desc: desc });
+    await ask(chatId, "Группа/Подкатегория (или '-' чтобы пропустить):");
+    return;
+  }
+  
+  if (task.step === "group") {
+    const group = input === "-" ? "" : clean(input, 40);
+    setPending(userId, { ...task, step: "breads", group: group });
+    await ask(chatId, "Хлеба (ID:Название, через запятую. Пример: 1:Батон,2:Лаваш. '-' чтобы пропустить):");
+    return;
+  }
+  
+  if (task.step === "breads") {
+    const breads = [];
+    if (input !== "-") {
+      input.split(",").forEach(p => {
+        const parts = p.split(":");
+        if (parts.length === 2) breads.push({ id: clean(parts[0], 40), name: clean(parts[1], 40) });
+      });
+    }
+    setPending(userId, { ...task, step: "extras", breads: breads });
+    await ask(chatId, "Добавки (ID:Название:Цена:Группа, через точку с запятой. Пример: 1:Сыр:50:Топпинг;2:Соус:30:Соус. '-' чтобы пропустить):");
+    return;
+  }
+  
+  if (task.step === "extras") {
+    const extras = [];
+    if (input !== "-") {
+      input.split(";").forEach(p => {
+        const parts = p.split(":");
+        if (parts.length >= 3) extras.push({ id: clean(parts[0], 60), name: clean(parts[1], 60), price: Number(parts[2]) || 0, group: clean(parts[3] || "", 40) });
+      });
+    }
+    // Create the item
+    const item = {
+      id: clean(task.name, 80) || Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      name: task.name,
+      category: task.category,
+      price: task.price,
+      desc: task.desc,
+      group: task.group,
+      breads: task.breads,
+      extras: task.extras,
+      art: ""
+    };
+    
+    if (menu.some(p => p.id === item.id)) {
+      await telegram("sendMessage", { chat_id: chatId, text: "⚠️ Позиция с таким ID уже существует. Измените название или удалите старую." });
+      clearPending(userId);
+      return showScreen(chatId, "menuadd");
+    }
+    
+    menu.unshift(item);
+    writeMenu(menu);
+    notifyAdmins(`📝 Меню: добавлена позиция «${item.name}» (${item.category}) — ${personName(m.from) || "админ"}`);
+    clearPending(userId);
+    await telegram("sendMessage", { chat_id: chatId, text: `✅ Позиция «${item.name}» успешно добавлена!` });
+    return showScreen(chatId, "menulist");
+  }
+  
+  async function ask(cid, txt) {
+    await telegram("sendMessage", { chat_id: cid, text: txt, reply_markup: { inline_keyboard: [[{ text: "Отмена", callback_data: "cancel" }]] } });
+  }
+}
+
+// --- Recipe Edit Pending Handler ---
+async function handleRecipeEditPending(chatId, userId, task, input) {
+  if (task.step === "text") {
+    const cleanBlock = (v) => String(v || "").replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim().slice(0, 2000);
+    const text = cleanBlock(input);
+    const state = staffState();
+    if (!state.recipes) state.recipes = {};
+    state.recipes[task.itemId] = { text: text, by: personName(m.from) || "админ", at: new Date().toISOString() };
+    writeStaff(state);
+    notifyAdmins(`🎵 Техкарта обновлена: «${task.itemName}» — ${personName(m.from) || "админ"}`);
+    clearPending(userId);
+    await telegram("sendMessage", { chat_id: chatId, text: "✅ Технологическая карта сохранена!" });
+    return showScreen(chatId, "recipes");
+  }
 }
 // A new admin: by id, by @nickname, or by replying to / forwarding anything
 // the person wrote. Telegram does not resolve nicknames for bots, so «@nick»
@@ -1097,6 +1403,40 @@ async function handleCallback(q) {
     await answer();
     return sendStaffLink(chatId);
   }
+  if (/^menuedit:/.test(data)) {
+    const itemId = data.slice(9);
+    await answer();
+    return showScreen(chatId, "menuedit", messageId);
+  }
+  if (/^menudel:/.test(data)) {
+    if (!isOwnerAdmin(userId))
+      return answer("Только главный администратор может удалять позиции", true);
+    const itemId = data.slice(8);
+    const item = menu.find((p) => p.id === itemId);
+    if (item) {
+      const idx = menu.findIndex((p) => p.id === itemId);
+      menu.splice(idx, 1);
+      writeMenu(menu);
+      notifyAdmins(`🗑️ Позиция удалена: «${item.name}» — ${personName(q.from) || "админ"}`);
+    }
+    await answer("Позиция удалена");
+    return showScreen(chatId, "menulist", messageId);
+  }
+  if (/^recipeedit:/.test(data)) {
+    if (!isOwnerAdmin(userId))
+      return answer("Только главный администратор может редактировать техкарты", true);
+    const itemId = data.slice(11);
+    const state = staffState();
+    const recipes = state.recipes || {};
+    const item = (state.menu || []).find((p) => p.id === itemId);
+    if (!item) {
+      await answer("Блюдо не найдено", true);
+      return showScreen(chatId, "recipes", messageId);
+    }
+    const recipe = recipes[itemId] || {};
+    await answer();
+    return showScreen(chatId, "recipes", messageId);
+  }
   if (/^m:/.test(data)) {
     await answer();
     return showScreen(chatId, data.slice(2), messageId);
@@ -1168,7 +1508,95 @@ const server = http.createServer(async (req, res) => {
     });
     return res.end();
   }
-  if (url.pathname === "/api/menu") return json(res, 200, publicMenu());
+  if (url.pathname === "/api/menu" && req.method === "GET") return json(res, 200, publicMenu());
+
+  // Menu management endpoints — only for main admin (owner from ADMIN_IDS)
+  if (url.pathname === "/api/menu" && (req.method === "POST" || req.method === "PUT" || req.method === "DELETE")) {
+    // Verify owner admin via initData (same as staff page)
+    let raw = "";
+    for await (const c of req) raw += c;
+    let body;
+    try {
+      if (raw.length > 50000) throw new Error("too big");
+      body = JSON.parse(raw || "{}");
+    } catch {
+      return json(res, 400, { error: "Некорректный запрос" });
+    }
+    const user = telegramUserFromInitData(String(body.initData || ""));
+    if (!user?.id) return json(res, 401, { error: "Не удалось подтвердить Telegram — откройте из бота" });
+    if (!isOwnerAdmin(user.id)) return json(res, 403, { error: "Только главный администратор может редактировать меню" });
+
+    if (req.method === "POST") {
+      // Create new menu item
+      const clean = (v, n) => String(v || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, n);
+      const cleanBlock = (v, n) => String(v || "").replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim().slice(0, n);
+
+      const item = {
+        id: clean(body.id, 80) || Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        name: clean(body.name, 100),
+        category: clean(body.category, 40),
+        price: Number(body.price) || 0,
+        desc: cleanBlock(body.desc, 500),
+        group: clean(body.group, 40),
+        breads: Array.isArray(body.breads) ? body.breads.map((b) => ({ id: clean(b.id, 40), name: clean(b.name, 40) })).filter((b) => b.id && b.name) : [],
+        extras: Array.isArray(body.extras) ? body.extras.map((e) => ({ id: clean(e.id, 60), name: clean(e.name, 60), price: Number(e.price) || 0, group: clean(e.group, 40) })).filter((e) => e.id && e.name) : [],
+        art: clean(body.art, 80),
+      };
+
+      if (!item.name || !item.category || item.price <= 0) {
+        return json(res, 400, { error: "Название, категория и цена обязательны" });
+      }
+      if (menu.some((p) => p.id === item.id)) {
+        return json(res, 409, { error: "Позиция с таким ID уже существует" });
+      }
+
+      menu.unshift(item);
+      writeMenu(menu);
+      notifyAdmins(`📝 Меню: добавлена позиция «${item.name}» (${item.category}) — ${personName(user) || "админ"}`);
+      return json(res, 201, { ok: true, item });
+    }
+
+    if (req.method === "PUT") {
+      // Update existing menu item
+      const clean = (v, n) => String(v || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, n);
+      const cleanBlock = (v, n) => String(v || "").replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim().slice(0, n);
+
+      const itemId = clean(body.id, 80);
+      const idx = menu.findIndex((p) => p.id === itemId);
+      if (idx === -1) return json(res, 404, { error: "Позиция не найдена" });
+
+      const updated = {
+        ...menu[idx],
+        name: clean(body.name, 100) || menu[idx].name,
+        category: clean(body.category, 40) || menu[idx].category,
+        price: typeof body.price === "number" ? body.price : menu[idx].price,
+        desc: cleanBlock(body.desc, 500) || menu[idx].desc,
+        group: clean(body.group, 40) || menu[idx].group,
+        breads: Array.isArray(body.breads) ? body.breads.map((b) => ({ id: clean(b.id, 40), name: clean(b.name, 40) })).filter((b) => b.id && b.name) : menu[idx].breads,
+        extras: Array.isArray(body.extras) ? body.extras.map((e) => ({ id: clean(e.id, 60), name: clean(e.name, 60), price: Number(e.price) || 0, group: clean(e.group, 40) })).filter((e) => e.id && e.name) : menu[idx].extras,
+        art: clean(body.art, 80) || menu[idx].art,
+      };
+
+      menu[idx] = updated;
+      writeMenu(menu);
+      notifyAdmins(`📝 Меню: обновлена позиция «${updated.name}» — ${personName(user) || "админ"}`);
+      return json(res, 200, { ok: true, item: updated });
+    }
+
+    if (req.method === "DELETE") {
+      const clean = (v, n) => String(v || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, n);
+      const itemId = clean(body.id, 80);
+      const idx = menu.findIndex((p) => p.id === itemId);
+      if (idx === -1) return json(res, 404, { error: "Позиция не найдена" });
+
+      const removed = menu[idx];
+      menu.splice(idx, 1);
+      writeMenu(menu);
+      notifyAdmins(`🗑️ Меню: удалена позиция «${removed.name}» — ${personName(user) || "админ"}`);
+      return json(res, 200, { ok: true });
+    }
+  }
+
   // Team endpoints. There is no login form: the page is opened from the bot,
   // Telegram signs who opened it, and a one-time link covers a plain browser.
   // Everything else carries the session token in the X-Staff-Token header,
@@ -1495,7 +1923,7 @@ const server = http.createServer(async (req, res) => {
         },
         items,
         total,
-        coinsEarned: plannedCoins(total),
+        coinsEarned: plannedCoins(items),
         credited: false,
       };
       orders.push(order);

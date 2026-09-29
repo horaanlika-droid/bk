@@ -2501,6 +2501,36 @@ select {
   border-radius: 5px;
   padding: 4px 7px;
 }
+.go-tag {
+  display: inline-block;
+  vertical-align: 2px;
+  margin-left: 7px;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: #0a7a2f;
+  color: #fff;
+  border-radius: 5px;
+  padding: 4px 7px;
+}
+.go-corner {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: #0a7a2f;
+  color: #fff;
+  border-radius: 5px;
+  padding: 4px 8px;
+  z-index: 2;
+}
+.product.go .product-image {
+  box-shadow: inset 0 0 0 2px #0a7a2f;
+}
 .product.stopped .product-image,
 .product.stopped .product-info > p,
 .product.stopped .bread-tags,
