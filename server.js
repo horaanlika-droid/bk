@@ -552,7 +552,7 @@ const notifyAdmins = (text) => {
 // A screen is one message: a text and a keyboard. The bot edits the current
 // message when it can, so a shift of button presses leaves one clean message
 // behind instead of a wall of them.
-function screenMain(userId) {
+function screenMain(chatId, userId) {
   const isOwner = isOwnerAdmin(userId);
   return {
     text:
@@ -593,7 +593,7 @@ function screenMain(userId) {
     ],
   };
 }
-function screenOrders() {
+function screenOrders(chatId, userId) {
   const orders = recentOrders(6);
   return {
     text: orders.length
@@ -605,7 +605,7 @@ function screenOrders() {
     ],
   };
 }
-function screenPay() {
+function screenPay(chatId, userId) {
   const unpaid = read()
     .filter((o) => !o.credited)
     .slice(-8)
@@ -625,7 +625,7 @@ function screenPay() {
     ],
   };
 }
-function screenList(kind) {
+function screenList(kind, chatId, userId) {
   const isStop = kind === "stop";
   const entries = staffState()[kind] || [];
   const lines = entries.map(
@@ -659,7 +659,7 @@ function screenList(kind) {
     ],
   };
 }
-function screenAdmins() {
+function screenAdmins(chatId, userId) {
   const list = adminList();
   return {
     text:
@@ -678,7 +678,7 @@ function screenAdmins() {
     ],
   };
 }
-function screenAddAdmin() {
+function screenAddAdmin(chatId, userId) {
   const candidates = readPeople().filter((p) => !isAdmin(p.id)).slice(0, 8);
   return {
     text:
@@ -696,7 +696,7 @@ function screenAddAdmin() {
     ],
   };
 }
-function screenHelp() {
+function screenHelp(chatId, userId) {
   return {
     text:
       "❓ Помощь\n\n" +
@@ -718,8 +718,8 @@ function screenHelp() {
 }
 
 // ---------- Menu management screens (owner only) ----------
-function screenMenu() {
-  if (!isOwnerAdmin(chatId)) {
+function screenMenu(chatId, userId) {
+  if (!isOwnerAdmin(userId)) {
     return {
       text: "⛔ Только главный администратор (ADMIN_IDS) может редактировать меню.",
       keyboard: [backRow],
@@ -738,8 +738,8 @@ function screenMenu() {
   };
 }
 
-function screenMenuList() {
-  if (!isOwnerAdmin(chatId)) {
+function screenMenuList(chatId, userId) {
+  if (!isOwnerAdmin(userId)) {
     return { text: "⛔ Только главный администратор.", keyboard: [backRow] };
   }
   const lines = menu
@@ -766,8 +766,8 @@ function screenMenuList() {
   };
 }
 
-function screenMenuEdit(itemId) {
-  if (!isOwnerAdmin(chatId)) {
+function screenMenuEdit(chatId, userId, itemId) {
+  if (!isOwnerAdmin(userId)) {
     return { text: "⛔ Только главный администратор.", keyboard: [backRow] };
   }
   const item = menu.find((p) => p.id === itemId);
@@ -795,22 +795,22 @@ function screenMenuEdit(itemId) {
   };
 }
 
-function screenMenuAdd() {
-  if (!isOwnerAdmin(chatId)) {
-    return { text: "⛔ Endast huvudadministratör.", keyboard: [backRow] };
+function screenMenuAdd(chatId, userId) {
+  if (!isOwnerAdmin(userId)) {
+    return { text: "⛔ Только главный администратор.", keyboard: [backRow] };
   }
   setPending(userId, { kind: "menuadd", step: "name" });
   return {
     text:
-      "➕ Lägg till menyartikel\n\n" +
-      "Skriv namnet på positionen:",
-    keyboard: [[{ text: "Avbryt", callback_data: "cancel" }]],
+      "➕ Добавить позицию меню\n\n" +
+      "Введите название позиции:",
+    keyboard: [[{ text: "Отмена", callback_data: "cancel" }]],
   };
 }
 
 // --- Технологические карты (рецепты) в боте -------------------------------
-function screenRecipes() {
-  if (!isOwnerAdmin(chatId)) {
+function screenRecipes(chatId, userId) {
+  if (!isOwnerAdmin(userId)) {
     return { text: "⛔ Только главный администратор.", keyboard: [backRow] };
   }
   const state = staffState();
@@ -855,19 +855,19 @@ const screens = {
   main: screenMain,
   orders: screenOrders,
   pay: screenPay,
-  stop: () => screenList("stop"),
-  go: () => screenList("go"),
+  stop: (chatId, userId) => screenList("stop"),
+  go: (chatId, userId) => screenList("go"),
   admins: screenAdmins,
   addadmin: screenAddAdmin,
-  menu: screenMenu,
-  menulist: screenMenuList,
-  menuedit: screenMenuEdit,
-  menuadd: screenMenuAdd,
-  recipes: screenRecipes,
+  menu: (chatId, userId) => screenMenu(chatId, userId),
+  menulist: (chatId, userId) => screenMenuList(chatId, userId),
+  menuedit: (chatId, userId, itemId) => screenMenuEdit(chatId, userId, itemId),
+  menuadd: (chatId, userId) => screenMenuAdd(chatId, userId),
+  recipes: (chatId, userId) => screenRecipes(chatId, userId),
   help: screenHelp,
 };
-async function showScreen(chatId, name, messageId) {
-  const screen = (screens[name] || screens.main)();
+async function showScreen(chatId, name, messageId, userId, itemId) {
+  const screen = (screens[name] || screens.main)(chatId, userId, itemId);
   const markup = { inline_keyboard: screen.keyboard };
   const chunks = splitTelegramText(screen.text, 3500);
   if (messageId && chunks.length === 1) {
@@ -957,7 +957,7 @@ async function finishListAdd(chatId, from, task, station) {
       chat_id: chatId,
       text: `«${name}» уже в списке`,
     });
-    await showScreen(chatId, task.kind);
+    await showScreen(chatId, task.kind, undefined, userId);
     return;
   }
   const entry = {
@@ -978,7 +978,7 @@ async function finishListAdd(chatId, from, task, station) {
     chat_id: chatId,
     text: task.kind === "stop" ? `✅ «${name}» снято с продажи` : `🏁 «${name}» в гоу-листе`,
   });
-  await showScreen(chatId, task.kind);
+  await showScreen(chatId, task.kind, undefined, userId);
 }
 async function handlePendingAnswer(m, task, text) {
   const chatId = m.chat.id;
@@ -997,7 +997,7 @@ async function handlePendingAnswer(m, task, text) {
     if (!isOwnerAdmin(userId)) {
       clearPending(userId);
       await telegram("sendMessage", { chat_id: chatId, text: "⛔ Только главный администратор." });
-      return showScreen(chatId, "main");
+      return showScreen(chatId, "main", undefined, userId);
     }
     return handleMenuAddPending(chatId, userId, task, name);
   }
@@ -1007,7 +1007,7 @@ async function handlePendingAnswer(m, task, text) {
     if (!isOwnerAdmin(userId)) {
       clearPending(userId);
       await telegram("sendMessage", { chat_id: chatId, text: "⛔ Только главный администратор." });
-      return showScreen(chatId, "main");
+      return showScreen(chatId, "main", undefined, userId);
     }
     return handleRecipeEditPending(chatId, userId, task, name);
   }
@@ -1118,7 +1118,7 @@ async function handleMenuAddPending(chatId, userId, task, input) {
     if (menu.some(p => p.id === item.id)) {
       await telegram("sendMessage", { chat_id: chatId, text: "⚠️ Позиция с таким ID уже существует. Измените название или удалите старую." });
       clearPending(userId);
-      return showScreen(chatId, "menuadd");
+      return showScreen(chatId, "menuadd", undefined, userId);
     }
     
     menu.unshift(item);
@@ -1126,7 +1126,7 @@ async function handleMenuAddPending(chatId, userId, task, input) {
     notifyAdmins(`📝 Меню: добавлена позиция «${item.name}» (${item.category}) — ${personName(m.from) || "админ"}`);
     clearPending(userId);
     await telegram("sendMessage", { chat_id: chatId, text: `✅ Позиция «${item.name}» успешно добавлена!` });
-    return showScreen(chatId, "menulist");
+    return showScreen(chatId, "menulist", undefined, userId);
   }
   
   async function ask(cid, txt) {
@@ -1146,7 +1146,7 @@ async function handleRecipeEditPending(chatId, userId, task, input) {
     notifyAdmins(`🎵 Техкарта обновлена: «${task.itemName}» — ${personName(m.from) || "админ"}`);
     clearPending(userId);
     await telegram("sendMessage", { chat_id: chatId, text: "✅ Технологическая карта сохранена!" });
-    return showScreen(chatId, "recipes");
+    return showScreen(chatId, "recipes", undefined, userId);
   }
 }
 // A new admin: by id, by @nickname, or by replying to / forwarding anything
@@ -1184,7 +1184,7 @@ async function commandAddAdmin(m, text) {
     name = person.name;
     username = person.username;
   } else {
-    await showScreen(chatId, "addadmin");
+    await showScreen(chatId, "addadmin", undefined, userId);
     return;
   }
   const result = addAdmin(id, {
@@ -1202,7 +1202,7 @@ async function commandAddAdmin(m, text) {
       chat_id: chatId,
       text: `${label} уже администратор.`,
     });
-    await showScreen(chatId, "admins");
+    await showScreen(chatId, "admins", undefined, userId);
     return;
   }
   const sent = await telegram("sendMessage", {
@@ -1220,7 +1220,7 @@ async function commandAddAdmin(m, text) {
         ? ""
         : "\n\n⚠️ Написать ему не получилось: как только он сам нажмёт /start у бота, меню откроется."),
   });
-  await showScreen(chatId, "admins");
+  await showScreen(chatId, "admins", undefined, userId);
 }
 async function handleAdminMessage(m) {
   const chatId = m.chat.id;
@@ -1234,7 +1234,7 @@ async function handleAdminMessage(m) {
   if (/^\/cancel(?:@\w+)?(?:\s|$)/i.test(text)) {
     clearPending(userId);
     await send("Отменили.");
-    return showScreen(chatId, "main");
+    return showScreen(chatId, "main", undefined, userId);
   }
   if (/^\/(id|myid)(?:@\w+)?(?:\s|$)/i.test(text)) {
     await send(
@@ -1252,9 +1252,9 @@ async function handleAdminMessage(m) {
     );
     return;
   }
-  if (/^\/stoplist(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "stop");
-  if (/^\/orders(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "orders");
-  if (/^\/admins(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "admins");
+  if (/^\/stoplist(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "stop", undefined, userId);
+  if (/^\/orders(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "orders", undefined, userId);
+  if (/^\/admins(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "admins", undefined, userId);
   if (/^\/addadmin(?:@\w+)?(?:\s|$)/i.test(text)) return commandAddAdmin(m, text);
   if (/^\/deladmin(?:@\w+)?(?:\s|$)/i.test(text)) {
     const arg = text.split(/\s+/).slice(1).join(" ").trim();
@@ -1272,13 +1272,13 @@ async function handleAdminMessage(m) {
     }
     const result = removeAdmin(id);
     await send(result.error ? "⚠️ " + result.error : "🚫 Админ удалён");
-    if (!result.error) await showScreen(chatId, "admins");
+    if (!result.error) await showScreen(chatId, "admins", undefined, userId);
     return;
   }
-  if (/^\/(menu|start)(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "main");
-  if (/^\/help(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "help");
+  if (/^\/(menu|start)(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "main", undefined, userId);
+  if (/^\/help(?:@\w+)?(?:\s|$)/i.test(text)) return showScreen(chatId, "help", undefined, userId);
   await send("Не понял команду — открываю меню 👇");
-  await showScreen(chatId, "main");
+  await showScreen(chatId, "main", undefined, userId);
 }
 async function handleCallback(q) {
   const data = String(q.data || "");
@@ -1319,7 +1319,7 @@ async function handleCallback(q) {
         ? result.error
         : `Готово: +${result.amount} коинов по заказу #${result.order.id}`,
     );
-    return showScreen(chatId, "pay", messageId);
+    return showScreen(chatId, "pay", messageId, userId);
   }
   if (/^rm:/.test(data)) {
     const [, kind, id] = data.split(":");
@@ -1328,7 +1328,7 @@ async function handleCallback(q) {
     const entry = state[list].find((x) => x.id === id);
     if (!entry) {
       await answer("Позиция уже убрана");
-      return showScreen(chatId, list, messageId);
+      return showScreen(chatId, list, messageId, userId);
     }
     state[list] = state[list].filter((x) => x.id !== id);
     writeStaff(state);
@@ -1336,7 +1336,7 @@ async function handleCallback(q) {
       `${list === "stop" ? "✅ Снято со стопа" : "🏁 Убрано из гоу-листа"} (${String(entry.station).toLowerCase()}): «${entry.name}» — ${personName(q.from) || "админ"}`,
     );
     await answer(list === "stop" ? "Вернули в продажу" : "Убрано из списка");
-    return showScreen(chatId, list, messageId);
+    return showScreen(chatId, list, messageId, userId);
   }
   if (/^new:/.test(data)) {
     const kind = data.slice(4) === "go" ? "go" : "stop";
@@ -1358,7 +1358,7 @@ async function handleCallback(q) {
     const task = takePending(userId);
     if (!task) {
       await answer("Начните заново: меню → «Добавить в стоп»");
-      return showScreen(chatId, "main", messageId);
+      return showScreen(chatId, "main", messageId, userId);
     }
     await finishListAdd(chatId, q.from, task, data.slice(3));
     return;
@@ -1380,7 +1380,7 @@ async function handleCallback(q) {
           "У вас есть всё: заказы, начисление коинов, стоп-листы и страница команды. " +
           "Откройте меню — /menu",
       });
-    return showScreen(chatId, "admins", messageId);
+    return showScreen(chatId, "admins", messageId, userId);
   }
   if (/^owner:/.test(data)) {
     await answer(
@@ -1392,12 +1392,12 @@ async function handleCallback(q) {
   if (/^del:/.test(data)) {
     const result = removeAdmin(data.slice(4));
     await answer(result.error ? result.error : "Админ удалён", !!result.error);
-    return showScreen(chatId, "admins", messageId);
+    return showScreen(chatId, "admins", messageId, userId);
   }
   if (data === "cancel") {
     clearPending(userId);
     await answer("Отменили");
-    return showScreen(chatId, "main", messageId);
+    return showScreen(chatId, "main", messageId, userId);
   }
   if (data === "m:link") {
     await answer();
@@ -1406,7 +1406,7 @@ async function handleCallback(q) {
   if (/^menuedit:/.test(data)) {
     const itemId = data.slice(9);
     await answer();
-    return showScreen(chatId, "menuedit", messageId);
+    return showScreen(chatId, "menuedit", messageId, userId, itemId);
   }
   if (/^menudel:/.test(data)) {
     if (!isOwnerAdmin(userId))
@@ -1420,7 +1420,7 @@ async function handleCallback(q) {
       notifyAdmins(`🗑️ Позиция удалена: «${item.name}» — ${personName(q.from) || "админ"}`);
     }
     await answer("Позиция удалена");
-    return showScreen(chatId, "menulist", messageId);
+    return showScreen(chatId, "menulist", messageId, userId);
   }
   if (/^recipeedit:/.test(data)) {
     if (!isOwnerAdmin(userId))
@@ -1431,15 +1431,15 @@ async function handleCallback(q) {
     const item = (state.menu || []).find((p) => p.id === itemId);
     if (!item) {
       await answer("Блюдо не найдено", true);
-      return showScreen(chatId, "recipes", messageId);
+      return showScreen(chatId, "recipes", messageId, userId);
     }
     const recipe = recipes[itemId] || {};
     await answer();
-    return showScreen(chatId, "recipes", messageId);
+    return showScreen(chatId, "recipes", messageId, userId);
   }
   if (/^m:/.test(data)) {
     await answer();
-    return showScreen(chatId, data.slice(2), messageId);
+    return showScreen(chatId, data.slice(2), messageId, userId);
   }
   await answer();
 }
