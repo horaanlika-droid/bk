@@ -381,18 +381,20 @@ function breadTags(p) {
 // such items with stop: true, the card shows «Стоп» and the add button is
 // disabled. The server also rejects stopped items at checkout, so a cached
 // menu cannot sneak one into an order.
+// Go list items are highlighted with a «Гоу» badge.
 const stopBadge = (p) => (p.stop ? '<span class="stop-tag">Стоп</span>' : "");
+const goBadge = (p) => (p.go ? '<span class="go-tag">Гоу</span>' : "");
 const addButton = (p, label) =>
   p.stop
     ? `<button class="add-button" disabled aria-label="${safe(p.name)} — временно закончился">${icon("close")}</button>`
     : `<button class="add-button" data-add="${p.id}" aria-label="${label}: ${safe(p.name)}">${icon("plus")}</button>`;
 function foodCard(p) {
   const action = isSandwich(p) ? "Собрать" : "Добавить";
-  return `<article class="product compact food-card ${p.stop ? "stopped" : ""}"><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}${stopBadge(p)}</button>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}${breadTags(p)}<div class="product-bottom"><strong>${money(p.price)}</strong>${addButton(p, action)}</div></div></article>`;
+  return `<article class="product compact food-card ${p.stop ? "stopped" : ""} ${p.go ? "go" : ""}"><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}${stopBadge(p)}${goBadge(p)}</button>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}${breadTags(p)}<div class="product-bottom"><strong>${money(p.price)}</strong>${addButton(p, action)}</div></div></article>`;
 }
 function productCard(p, compact = false) {
   if (!hasArt(p)) return foodCard(p);
-  return `<article class="product ${compact ? "compact" : ""} ${p.stop ? "stopped" : ""}"><button class="product-image ${p.art ? "art-tile" : ""}" data-detail="${p.id}" aria-label="Подробнее: ${safe(p.name)}">${productArt(p)}${p.id === "большой-латте" ? '<span class="hit">ХИТ</span>' : ""}</button><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}${stopBadge(p)}</button><p>${safe(p.desc)}</p><div class="product-bottom"><strong>${money(p.price)}</strong>${addButton(p, "Добавить")}</div></div></article>`;
+  return `<article class="product ${compact ? "compact" : ""} ${p.stop ? "stopped" : ""} ${p.go ? "go" : ""}"><button class="product-image ${p.art ? "art-tile" : ""}" data-detail="${p.id}" aria-label="Подробнее: ${safe(p.name)}">${productArt(p)}${p.id === "большой-латте" ? '<span class="hit">ХИТ</span>' : ""}${p.go ? '<span class="go-corner">Гоу</span>' : ""}</button><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}${stopBadge(p)}${goBadge(p)}</button><p>${safe(p.desc)}</p><div class="product-bottom"><strong>${money(p.price)}</strong>${addButton(p, "Добавить")}</div></div></article>`;
 }
 function statusMarkup() {
   return loading
