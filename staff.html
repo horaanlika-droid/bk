@@ -29,43 +29,23 @@
     </header>
 
     <main id="main">
-      <!-- Personal access: the admin issues a login and a password with the
-           /adduser command in the bot. Every change on this page is signed
-           with the account's name automatically. -->
+      <!-- No passwords. The page is opened from the bot: Telegram signs who
+           opened it, and a one-time link covers a plain browser. Every change
+           on this page is signed with the admin's name automatically. -->
       <section id="login" class="login" hidden>
         <h1>Привет, команда!</h1>
         <p>
-          Здесь живут стоп- и гоу-листы, смена и внутренние вопросы. Повар
-          заполняет технологические карты блюд — алгоритм приготовления бот
-          приложит к заказу. Доступ выдаёт администратор командой
-          <b>/adduser</b> в рабочем боте; набор разделов зависит от роли.
+          Здесь живут стоп- и гоу-листы, технологические карты блюд, смена и
+          внутренние вопросы. Вход — по Telegram: откройте страницу из бота
+          кнопкой <b>🛠 Открыть /staff</b> в меню администратора. Паролей нет,
+          права у всех администраторов полные.
         </p>
-        <form id="loginForm">
-          <label class="form-label" for="login-input">Логин</label>
-          <input
-            id="login-input"
-            autocomplete="username"
-            autocapitalize="off"
-            spellcheck="false"
-            placeholder="например, anya"
-            maxlength="40"
-            required
-          />
-          <label class="form-label" for="password-input">Пароль</label>
-          <input
-            id="password-input"
-            type="password"
-            autocomplete="current-password"
-            placeholder="••••••••"
-            maxlength="100"
-            required
-          />
-          <button class="primary full" type="submit">Войти</button>
-          <p class="fine error" id="loginError" hidden></p>
-          <p class="fine">
-            Забыт пароль? Попроси управляющего прислать новый: /newpass твой-логин.
-          </p>
-        </form>
+        <p class="fine error" id="loginError" hidden></p>
+        <p class="fine">
+          Нужен вход в обычном браузере — например, на планшете у кассы?
+          Попросите в боте одноразовую ссылку: меню →
+          <b>🔑 Ссылка на /staff</b>. Устройство запомнит вход на два месяца.
+        </p>
       </section>
 
       <section id="panel" hidden>
@@ -81,6 +61,7 @@
     </main>
 
     <div id="announcements" class="toast-region" role="status" aria-live="polite"></div>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="staff.js"></script>
   </body>
 </html>

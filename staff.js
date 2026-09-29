@@ -1,7 +1,8 @@
-// Team page: station-specific stop/go lists, kitchen recipe cards, today's
-// shift roster and an internal question board. Access is personal — admins
-// issue roles in the bot; the server enforces permissions and signs changes
-// with the account's name. Kept to ES2020 like app.js for older WebViews.
+// Team page: stop/go lists, kitchen recipe cards, today's shift roster and an
+// internal question board. There is no login form: the page is opened from the
+// bot, Telegram confirms who the user is, and every admin gets the full tool
+// set. Changes are signed with the admin's name. Kept to ES2020 like app.js
+// for older WebViews.
 const $ = (s) => document.querySelector(s);
 const safe = (s) =>
   String(s).replace(
@@ -63,6 +64,12 @@ function toast(text, ms = 3000) {
   $("#announcements").append(el);
   setTimeout(() => el.remove(), ms);
 }
+function showLoginError(message) {
+  const el = $("#loginError");
+  if (!el || !message) return;
+  el.textContent = message;
+  el.hidden = false;
+}
 function logout(message) {
   token = "";
   me = null;
@@ -71,7 +78,7 @@ function logout(message) {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
   show();
-  if (message) toast(message, 5000);
+  showLoginError(message);
 }
 async function api(path, body) {
   const options = body
@@ -368,16 +375,33 @@ function show() {
   }
 }
 
-$("#loginForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const button = e.target.querySelector("button");
-  button.disabled = true;
-  $("#loginError").hidden = true;
+// Entrance. Opened from the bot, Telegram's signed initData is the password;
+// a one-time link from the bot (…/staff#key=…) covers a plain browser. The key
+// is wiped from the address bar so a used link is never left lying around.
+const initData = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp.initData || "" : "";
+async function start() {
   try {
-    const data = await api("/api/staff/login", {
-      login: $("#login-input").value.trim(),
-      password: $("#password-input").value,
-    });
+    if (window.Telegram && window.Telegram.WebApp) {
+      try {
+        window.Telegram.WebApp.ready();
+        window.Telegram.WebApp.expand();
+      } catch (err) {}
+    }
+    if (token) return show();
+    const hash = new URLSearchParams(String(location.hash || "").replace(/^#/, ""));
+    const key = hash.get("key");
+    let data;
+    if (key) {
+      data = await api("/api/staff/key", { key });
+      if (history.replaceState)
+        history.replaceState(null, "", location.pathname + location.search);
+    } else if (initData) {
+      data = await api("/api/staff/telegram", { initData });
+    } else {
+      return logout(
+        "Откройте страницу из бота: меню администратора → «🛠 Открыть /staff».",
+      );
+    }
     token = data.token;
     me = data.me;
     store.set("bk-staff-token", token);
@@ -385,12 +409,9 @@ $("#loginForm").addEventListener("submit", async (e) => {
     show();
     toast("Привет, " + me.name + "!");
   } catch (err) {
-    $("#loginError").textContent = err.message;
-    $("#loginError").hidden = false;
-  } finally {
-    button.disabled = false;
+    logout(err.message);
   }
-});
+}
 $("#logout").addEventListener("click", () => {
   api("/api/staff/logout", {}).catch(() => {});
   logout("До встречи!");
@@ -435,4 +456,4 @@ document.addEventListener("click", (e) => {
     toast("Что-то пошло не так: " + err.message, 5000);
   }
 });
-show();
+start();
