@@ -396,17 +396,7 @@ function menuResults() {
       // Food follows the paper menu: sandwiches with a bread choice, the ones
       // made only in flatbread, then the kitchen card — breakfasts, salads,
       // soups and mains — and finally nuggets and sauces.
-      const parts = [
-        ...kitchen,
-        {
-          title: "Сэндвичи на твой выбор",
-          note: "Готовим в лепёшке, хлебе или булочке — выберешь при добавлении",
-          items: group.filter(hasBreadChoice),
-        },
-        {
-          title: "Готовятся в лепёшке",
-          items: group.filter((p) => isSandwich(p) && !hasBreadChoice(p)),
-        },
+      const kitchen = [
         {
           title: "Завтраки",
           note: "К кашам идёт сет из дополнительных добавок для ярких впечатлений",
@@ -418,6 +408,18 @@ function menuResults() {
         },
         { title: "Супы", items: group.filter((p) => p.group === "Супы") },
         { title: "Горячее", items: group.filter((p) => p.group === "Горячее") },
+      ];
+      const parts = [
+        {
+          title: "Сэндвичи на твой выбор",
+          note: "Готовим в лепёшке, хлебе или булочке — выберешь при добавлении",
+          items: group.filter(hasBreadChoice),
+        },
+        {
+          title: "Готовятся в лепёшке",
+          items: group.filter((p) => isSandwich(p) && !hasBreadChoice(p)),
+        },
+        ...kitchen,
         { title: "Наггетсы", items: group.filter((p) => p.group === "Наггетсы") },
         { title: "Соусы", items: group.filter((p) => p.group === "Соусы") },
       ];
