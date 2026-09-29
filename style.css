@@ -65,6 +65,100 @@ body {
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }
+body.is-preloading {
+  overflow: hidden;
+}
+.preloader {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #fff;
+  opacity: 1;
+  transition: opacity 420ms ease;
+}
+.preloader.preloader-done {
+  opacity: 0;
+  pointer-events: none;
+}
+.preloader-card {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  text-align: center;
+  transform: translateY(-8px);
+}
+.preloader-logo {
+  width: 104px;
+  height: 104px;
+  object-fit: contain;
+  animation: preloader-float 1.5s ease-in-out infinite alternate;
+}
+.preloader-brand {
+  margin-top: 18px;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 1.7px;
+}
+.preloader-message {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.preloader-progress {
+  width: min(72vw, 250px);
+  height: 6px;
+  margin-top: 26px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--soft);
+}
+.preloader-progress > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--yellow), #ffdb60);
+  transition: width 100ms linear;
+}
+.preloader-percent {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.preloader-credit {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  bottom: max(14px, env(safe-area-inset-bottom, 0px));
+  left: 16px;
+  color: #a09e98;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.25px;
+  text-align: center;
+}
+@keyframes preloader-float {
+  from {
+    transform: translateY(0) scale(1);
+  }
+  to {
+    transform: translateY(-5px) scale(1.025);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .preloader-logo {
+    animation: none;
+  }
+  .preloader,
+  .preloader-progress > span {
+    transition-duration: 1ms;
+  }
+}
 button,
 input,
 select {
@@ -2311,25 +2405,86 @@ select {
   filter: grayscale(1) brightness(3);
 }
 
-/* Food: text cards without photos, bread choice shown as small icons. */
+/* Food: strong visual separators for the subcategories inside «Еда». */
+.food-group > h2 {
+  margin: 0 0 16px;
+  padding: 14px 18px;
+  color: #fff;
+  background: var(--ink);
+  border-radius: 16px;
+}
+.food-part {
+  margin-top: 20px;
+  padding: 15px 18px 5px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--yellow);
+  border-radius: 16px;
+  background: linear-gradient(135deg, #fff 0%, var(--soft) 100%);
+  box-shadow: 0 6px 20px rgb(21 21 21 / 4%);
+}
 .food-part + .food-part {
-  margin-top: 26px;
+  margin-top: 18px;
 }
 .food-part h3 {
-  font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 16px;
+  font-weight: 800;
   letter-spacing: -0.3px;
+}
+.food-part h3::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 50%;
+  background: var(--yellow);
+  box-shadow: 0 0 0 4px rgb(255 194 27 / 18%);
 }
 .food-note {
   font-size: 11px;
   color: var(--muted);
-  margin-top: 5px;
+  margin-top: 8px;
   line-height: 1.5;
 }
-.food-part h3 + .menu-grid {
-  margin-top: 4px;
+.food-part h3 + .menu-grid,
+.food-part .food-note + .menu-grid {
+  margin-top: 8px;
 }
 .allergy-note {
-  margin-top: 22px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  color: #665315;
+  background: #fff8df;
+  border: 1px solid #f3dfa0;
+  border-radius: 12px;
+}
+@media (max-width: 680px) {
+  .food-group > h2 {
+    margin-bottom: 12px;
+    padding: 12px 15px;
+    border-radius: 13px;
+  }
+  .food-part {
+    padding: 13px 13px 4px;
+    border-left-width: 3px;
+    border-radius: 14px;
+  }
+  .food-part + .food-part {
+    margin-top: 13px;
+  }
+  .food-part h3 {
+    gap: 8px;
+    padding-bottom: 8px;
+    font-size: 14px;
+  }
+  .food-note {
+    font-size: 10px;
+  }
 }
 /* Stop list: the team marks an item as sold out on /staff, the card stays
    visible but clearly unavailable — the add button is off. */
