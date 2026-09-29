@@ -2328,6 +2328,34 @@ select {
 .food-part h3 + .menu-grid {
   margin-top: 4px;
 }
+.allergy-note {
+  margin-top: 22px;
+}
+/* Stop list: the team marks an item as sold out on /staff, the card stays
+   visible but clearly unavailable — the add button is off. */
+.stop-tag {
+  display: inline-block;
+  vertical-align: 2px;
+  margin-left: 7px;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: #171717;
+  color: #fff;
+  border-radius: 5px;
+  padding: 4px 7px;
+}
+.product.stopped .product-image,
+.product.stopped .product-info > p,
+.product.stopped .bread-tags,
+.product.stopped .product-bottom strong {
+  opacity: 0.45;
+}
+.product.stopped .add-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .food-card .product-info p {
   margin-top: 4px;
 }

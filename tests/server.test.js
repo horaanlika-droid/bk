@@ -18,6 +18,9 @@ before(async () => {
     "style.css",
     "app.js",
     "menu.json",
+    "staff.html",
+    "staff.js",
+    "staff.css",
     "assets",
   ]) {
     await cp(new URL("../" + file, import.meta.url), join(directory, file), {
@@ -38,6 +41,7 @@ before(async () => {
       PORT: String(port),
       BOT_TOKEN: "",
       ADMIN_IDS: "",
+      STAFF_PIN: "test-staff-pin",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -64,6 +68,23 @@ test("menu and public assets load with correct MIME types", async () => {
   for (const item of menu.filter((p) => p.category !== "Еда"))
     assert.ok(item.art, "drink has an illustration: " + item.id);
   assert.equal(menu.find((item) => item.id === "большой-латте").price, 200);
+  // The kitchen card added from the photographed paper menu: breakfasts,
+  // salads, soups and mains, each with a weight in the description.
+  for (const [group, id, price] of [
+    ["Завтраки", "сырники", 320],
+    ["Завтраки", "английский-завтрак", 420],
+    ["Салаты", "салат-с-креветками", 350],
+    ["Салаты", "хумус", 320],
+    ["Супы", "том-ям-с-креветками", 410],
+    ["Горячее", "паста-с-тигровыми-креветками", 575],
+  ]) {
+    const item = menu.find((p) => p.id === id);
+    assert.ok(item, id);
+    assert.equal(item.group, group, id);
+    assert.equal(item.price, price, id);
+    assert.equal(item.category, "Еда", id);
+    assert.match(item.desc, / г$/, id + " lists its weight");
+  }
   for (const [url, type] of [
     ["/", "text/html"],
     ["/app.js", "text/javascript"],
@@ -429,4 +450,190 @@ test("sheets follow the visible area and failures never dead-end", async () => {
   assert.match(app, /data-action="diagnostics"/);
   assert.match(app, /logError\(where, message\)/);
   assert.match(app, /class="fine app-version">Версия \$\{APP_VERSION\}/);
+});
+
+// ---------------------------------------------------------------------------
+// Team tools: personal accounts issued by the admin in the bot, the stop list
+// that really removes an item from sale, the go list, the shift roster and
+// the question board.
+test("staff access is personal and issued by the admin in the bot", async () => {
+  const source = await readFile(join(directory, "server.js"), "utf8");
+  // Account management lives in the admin branch of the bot: /adduser,
+  // /newpass, /deluser, /team — the same people who control orders.
+  assert.match(source, /\/\^\\\/\(team\|adduser\|newpass\|deluser\)/);
+  assert.match(source, /admins\.includes\(String\(m\.chat\.id\)\)/);
+  assert.match(source, /function createAccount\(/);
+  // Passwords are stored only as salted scrypt hashes.
+  assert.match(source, /crypto\.scryptSync/);
+  assert.doesNotMatch(source, /password: *String\(body\.password\)[^)]*writeStaff/);
+  // Wrong or missing credentials do not pass.
+  const bad = await fetch(base + "/api/staff/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login: "admin", password: "wrong" }),
+  });
+  assert.equal(bad.status, 403);
+  assert.equal(
+    (await fetch(base + "/api/staff/state")).status,
+    401,
+    "state requires a session token",
+  );
+  const noToken = await fetch(base + "/api/staff/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Сырники", station: "Кухня" }),
+  });
+  assert.equal(noToken.status, 401);
+});
+
+// One session drives the rest of the team checks: STAFF_PIN is the emergency
+// admin login used because the test bot is offline.
+async function staffLogin() {
+  const response = await fetch(base + "/api/staff/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login: "admin", password: "test-staff-pin" }),
+  });
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.ok(data.token);
+  return data.token;
+}
+const staffPost = (token, path, body) =>
+  fetch(base + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Staff-Token": token },
+    body: JSON.stringify(body),
+  });
+
+test("stop list removes an item from sale until the team returns it", async () => {
+  const token = await staffLogin();
+  const added = await staffPost(token, "/api/staff/stop", {
+    itemId: "сырники",
+    name: "Сырники",
+    station: "Кухня",
+  });
+  assert.equal(added.status, 200);
+  const stopped = (await added.json()).stop;
+  assert.equal(stopped[0].name, "Сырники");
+  assert.equal(stopped[0].by, "Админ", "the change is signed by the account");
+  // The customer menu now carries the flag…
+  const menu = await (await fetch(base + "/api/menu")).json();
+  assert.equal(menu.find((p) => p.id === "сырники").stop, true);
+  assert.ok(!menu.find((p) => p.id === "большой-латте").stop);
+  // …and checkout refuses the stopped item with a clear reason.
+  const refused = await fetch(base + "/api/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      items: [{ id: "сырники", qty: 1 }],
+      type: "here",
+      branch: "Волжский",
+      customer: { name: "Тест", phone: "+7 900 000-00-00" },
+    }),
+  });
+  assert.equal(refused.status, 400);
+  assert.match((await refused.json()).error, /стоп-лист/);
+  // The same item cannot be stopped twice for the same station.
+  assert.equal(
+    (
+      await staffPost(token, "/api/staff/stop", {
+        itemId: "сырники",
+        name: "Сырники",
+        station: "Кухня",
+      })
+    ).status,
+    409,
+  );
+  // Back on sale: the flag disappears and the order goes through.
+  const removed = await staffPost(token, "/api/staff/stop", {
+    action: "remove",
+    id: stopped[0].id,
+  });
+  assert.equal(removed.status, 200);
+  assert.equal((await removed.json()).stop.length, 0);
+  const fresh = await (await fetch(base + "/api/menu")).json();
+  assert.ok(!fresh.find((p) => p.id === "сырники").stop);
+  const ok = await fetch(base + "/api/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      items: [{ id: "сырники", qty: 1 }],
+      type: "here",
+      branch: "Волжский",
+      customer: { name: "Тест", phone: "+7 900 000-00-00" },
+    }),
+  });
+  assert.equal(ok.status, 201);
+  assert.equal((await ok.json()).total, 320);
+});
+
+test("go list, shift roster and question board work end to end", async () => {
+  const token = await staffLogin();
+  // Go list entries may name things that are not in the menu at all.
+  const go = await staffPost(token, "/api/staff/go", {
+    name: "Пирог дня",
+    station: "Бар",
+    note: "Срок до вечера",
+  });
+  assert.equal(go.status, 200);
+  const goList = (await go.json()).go;
+  assert.equal(goList[0].note, "Срок до вечера");
+  await staffPost(token, "/api/staff/go", { action: "remove", id: goList[0].id });
+  // Shift roster: added for today, duplicates refused.
+  const shift = await staffPost(token, "/api/staff/shift", {
+    name: "Аня",
+    role: "Бар",
+  });
+  assert.equal(shift.status, 200);
+  assert.equal((await shift.json()).shift[0].name, "Аня");
+  assert.equal(
+    (await staffPost(token, "/api/staff/shift", { name: "Аня", role: "Бар" }))
+      .status,
+    409,
+  );
+  // Board: add, resolve, delete.
+  const note = await staffPost(token, "/api/staff/board", {
+    text: "Заканчивается альтернативное молоко",
+  });
+  assert.equal(note.status, 200);
+  const board = (await note.json()).board;
+  assert.equal(board[0].done, false);
+  const toggled = await staffPost(token, "/api/staff/board", {
+    action: "toggle",
+    id: board[0].id,
+  });
+  assert.equal((await toggled.json()).board[0].done, true);
+  await staffPost(token, "/api/staff/board", { action: "remove", id: board[0].id });
+  // Logout kills the token.
+  await staffPost(token, "/api/staff/logout", {});
+  assert.equal(
+    (await staffPost(token, "/api/staff/board", { text: "после выхода" })).status,
+    401,
+  );
+});
+
+test("the /staff page is served while team data stays private", async () => {
+  for (const url of ["/staff", "/staff.html"]) {
+    const response = await fetch(base + url);
+    assert.equal(response.status, 200, url);
+    assert.ok(response.headers.get("content-type").startsWith("text/html"), url);
+    assert.match(await response.text(), /Для команды/);
+  }
+  for (const [url, type] of [
+    ["/staff.js", "text/javascript"],
+    ["/staff.css", "text/css"],
+  ]) {
+    const response = await fetch(base + url);
+    assert.equal(response.status, 200, url);
+    assert.ok(response.headers.get("content-type").startsWith(type), url);
+  }
+  // Accounts, sessions and lists never leave the server as a file.
+  assert.equal((await fetch(base + "/data/staff.json")).status, 404);
+  // The customer app knows how to show a stopped item.
+  const app = await readFile(join(directory, "app.js"), "utf8");
+  assert.match(app, /stop-tag/);
+  assert.match(app, /стоп-лист/);
+  const style = await readFile(join(directory, "style.css"), "utf8");
+  assert.match(style, /\.stop-tag \{/);
 });
