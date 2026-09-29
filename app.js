@@ -122,7 +122,7 @@ if (tgUser) {
 // The version at the bottom of the profile names this exact build: the same
 // content hash the server puts into app.js?v=…, so a screenshot of the profile
 // says which code the Mini App is actually running right now.
-const APP_VERSION = "2026.09.27";
+const APP_VERSION = "2026.09.29";
 // The script tag is found by its file name, not by a substring: the Telegram
 // SDK lives at «…/telegram-web-app.js», which also contains «app.js» and was
 // matched first — the profile then showed «dev» instead of the real build hash.
@@ -339,7 +339,7 @@ function breadTags(p) {
 }
 function foodCard(p) {
   const action = isSandwich(p) ? "Собрать" : "Добавить";
-  return `<article class="product compact food-card"><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}</button>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}${breadTags(p)}<div class="product-bottom"><strong>${money(p.price)}</strong><button class="add-button" data-add="${p.id}" aria-label="${action}: ${safe(p.name)}">${icon("plus")}</button></div></div></article>`;
+  return `<article class="product compact food-card"><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}</button>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}${breadTags(p)}<div class="product-bottom"><span class="price-wrap"><strong>${money(p.price)}</strong>${p.weight ? `<small class="weight">${safe(p.weight)}</small>` : ""}</span><button class="add-button" data-add="${p.id}" aria-label="${action}: ${safe(p.name)}">${icon("plus")}</button></div></div></article>`;
 }
 function productCard(p, compact = false) {
   if (!hasArt(p)) return foodCard(p);
@@ -384,9 +384,22 @@ function menuResults() {
       if (!group.length) return "";
       if (c !== "Еда")
         return `<section class="menu-group"><h2>${c}</h2>${grid(group)}</section>`;
-      // Food follows the paper menu: sandwiches with a bread choice, the ones
-      // made only in flatbread, then nuggets and sauces.
+      // Food follows the paper menu: breakfasts, starters, salads, soups, hot,
+      // then sandwiches
+      // with a bread choice, the ones made only in flatbread, nuggets, sauces.
+      const kitchen = [
+        ["Завтраки", "К кашам идёт сет из дополнительных добавок для ярких впечатлений"],
+        ["Закуски"],
+        ["Салаты"],
+        ["Супы"],
+        ["Горячее"],
+      ].map(([title, note]) => ({
+        title,
+        note,
+        items: group.filter((p) => p.group === title),
+      }));
       const parts = [
+        ...kitchen,
         {
           title: "Сэндвичи на твой выбор",
           note: "Готовим в лепёшке, хлебе или булочке — выберешь при добавлении",
@@ -654,7 +667,7 @@ function productDetail(id) {
     ? "Рисунок временный — фото напитка появится позже. Уточнить состав можно у бариста."
     : "Уточнить состав можно у бариста.";
   openSheet(
-    `${sheetHead(safe(p.name))}${art}<div class="detail-description"><h3>${safe(p.name)} <span>${money(p.price)}</span></h3>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}<p class="fine">${note}</p></div><button class="primary full" data-detail-add="${p.id}">Добавить в корзину · ${money(p.price)} ${icon("plus")}</button>`,
+    `${sheetHead(safe(p.name))}${art}<div class="detail-description"><h3>${safe(p.name)} <span>${money(p.price)}</span></h3>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}${p.weight ? `<p class="fine">Выход: ${safe(p.weight)}</p>` : ""}<p class="fine">${note}</p></div><button class="primary full" data-detail-add="${p.id}">Добавить в корзину · ${money(p.price)} ${icon("plus")}</button>`,
   );
 }
 let builder = null;

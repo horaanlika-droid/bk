@@ -28,7 +28,7 @@ const assetHash = (name) =>
 const buildInfo = () => ({
   hash: assetHash("app.js"),
   style: assetHash("style.css"),
-  app: "2026.09.27",
+  app: "2026.09.29",
 });
 // The catalogue lives in menu.json, not in this file. The app also loads that
 // very file when /api/menu is unreachable, so the menu, the sandwich builder
