@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="robots" content="noindex" />
+    <meta
+      name="description"
+      content="Большой Кофе — внутренняя страница для команды: стоп-лист, гоу-лист, смена и вопросы."
+    />
+    <title>Для команды — Большой Кофе</title>
+    <link rel="icon" href="assets/logo.png" type="image/png" />
+    <link rel="stylesheet" href="staff.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Большой Кофе — главная">
+        <img src="assets/logo.png" alt="" />
+        <span>БОЛЬШОЙ КОФЕ<small>ДЛЯ КОМАНДЫ</small></span>
+      </a>
+      <div class="header-me">
+        <span id="me" hidden></span>
+        <button id="logout" class="ghost" hidden>Выйти</button>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- Personal access: the admin issues a login and a password with the
+           /adduser command in the bot. Every change on this page is signed
+           with the account's name automatically. -->
+      <section id="login" class="login" hidden>
+        <h1>Привет, команда!</h1>
+        <p>
+          Здесь живут стоп-лист и гоу-лист кухни и бара, состав смены и
+          внутренние вопросы. Логин и пароль выдаёт управляющий или старший
+          смены — командой <b>/adduser</b> в рабочем боте.
+        </p>
+        <form id="loginForm">
+          <label class="form-label" for="login-input">Логин</label>
+          <input
+            id="login-input"
+            autocomplete="username"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="например, anya"
+            maxlength="40"
+            required
+          />
+          <label class="form-label" for="password-input">Пароль</label>
+          <input
+            id="password-input"
+            type="password"
+            autocomplete="current-password"
+            placeholder="••••••••"
+            maxlength="100"
+            required
+          />
+          <button class="primary full" type="submit">Войти</button>
+          <p class="fine error" id="loginError" hidden></p>
+          <p class="fine">
+            Забыт пароль? Попроси управляющего прислать новый: /newpass твой-логин.
+          </p>
+        </form>
+      </section>
+
+      <section id="panel" hidden>
+        <nav class="tabs" aria-label="Разделы">
+          <button data-tab="stop" class="selected">Стоп-лист <i id="stopCount" hidden>0</i></button>
+          <button data-tab="go">Гоу-лист <i id="goCount" hidden>0</i></button>
+          <button data-tab="shift">Смена</button>
+          <button data-tab="board">Вопросы <i id="boardCount" hidden>0</i></button>
+        </nav>
+        <div id="tabContent"></div>
+      </section>
+    </main>
+
+    <div id="announcements" class="toast-region" role="status" aria-live="polite"></div>
+    <script src="staff.js"></script>
+  </body>
+</html>

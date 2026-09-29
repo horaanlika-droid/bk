@@ -122,7 +122,7 @@ if (tgUser) {
 // The version at the bottom of the profile names this exact build: the same
 // content hash the server puts into app.js?v=…, so a screenshot of the profile
 // says which code the Mini App is actually running right now.
-const APP_VERSION = "2026.09.27";
+const APP_VERSION = "2026.09.29";
 // The script tag is found by its file name, not by a substring: the Telegram
 // SDK lives at «…/telegram-web-app.js», which also contains «app.js» and was
 // matched first — the profile then showed «dev» instead of the real build hash.
@@ -337,13 +337,22 @@ function breadTags(p) {
     return `<div class="bread-tags single">${breadIcon(p.breads[0].id)}<span>Только ${safe(p.breads[0].name.toLowerCase())}</span></div>`;
   return `<div class="bread-tags" aria-label="На выбор: ${p.breads.map((b) => safe(b.name.toLowerCase())).join(", ")}">${p.breads.map((b) => `<span>${breadIcon(b.id)}${breadShort[b.id] || safe(b.name)}</span>`).join("")}</div>`;
 }
+// The kitchen and the bar manage the stop list on /staff: /api/menu marks
+// such items with stop: true, the card shows «Стоп» and the add button is
+// disabled. The server also rejects stopped items at checkout, so a cached
+// menu cannot sneak one into an order.
+const stopBadge = (p) => (p.stop ? '<span class="stop-tag">Стоп</span>' : "");
+const addButton = (p, label) =>
+  p.stop
+    ? `<button class="add-button" disabled aria-label="${safe(p.name)} — временно закончился">${icon("close")}</button>`
+    : `<button class="add-button" data-add="${p.id}" aria-label="${label}: ${safe(p.name)}">${icon("plus")}</button>`;
 function foodCard(p) {
   const action = isSandwich(p) ? "Собрать" : "Добавить";
-  return `<article class="product compact food-card"><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}</button>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}${breadTags(p)}<div class="product-bottom"><strong>${money(p.price)}</strong><button class="add-button" data-add="${p.id}" aria-label="${action}: ${safe(p.name)}">${icon("plus")}</button></div></div></article>`;
+  return `<article class="product compact food-card ${p.stop ? "stopped" : ""}"><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}${stopBadge(p)}</button>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}${breadTags(p)}<div class="product-bottom"><strong>${money(p.price)}</strong>${addButton(p, action)}</div></div></article>`;
 }
 function productCard(p, compact = false) {
   if (!hasArt(p)) return foodCard(p);
-  return `<article class="product ${compact ? "compact" : ""}"><button class="product-image ${p.art ? "art-tile" : ""}" data-detail="${p.id}" aria-label="Подробнее: ${safe(p.name)}">${productArt(p)}${p.id === "большой-латте" ? '<span class="hit">ХИТ</span>' : ""}</button><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}</button><p>${safe(p.desc)}</p><div class="product-bottom"><strong>${money(p.price)}</strong><button class="add-button" data-add="${p.id}" aria-label="Добавить ${safe(p.name)}">${icon("plus")}</button></div></div></article>`;
+  return `<article class="product ${compact ? "compact" : ""} ${p.stop ? "stopped" : ""}"><button class="product-image ${p.art ? "art-tile" : ""}" data-detail="${p.id}" aria-label="Подробнее: ${safe(p.name)}">${productArt(p)}${p.id === "большой-латте" ? '<span class="hit">ХИТ</span>' : ""}</button><div class="product-info"><button class="product-name" data-detail="${p.id}">${safe(p.name)}${stopBadge(p)}</button><p>${safe(p.desc)}</p><div class="product-bottom"><strong>${money(p.price)}</strong>${addButton(p, "Добавить")}</div></div></article>`;
 }
 function statusMarkup() {
   return loading
@@ -385,7 +394,8 @@ function menuResults() {
       if (c !== "Еда")
         return `<section class="menu-group"><h2>${c}</h2>${grid(group)}</section>`;
       // Food follows the paper menu: sandwiches with a bread choice, the ones
-      // made only in flatbread, then nuggets and sauces.
+      // made only in flatbread, then the kitchen card — breakfasts, salads,
+      // soups and mains — and finally nuggets and sauces.
       const parts = [
         {
           title: "Сэндвичи на твой выбор",
@@ -396,6 +406,17 @@ function menuResults() {
           title: "Готовятся в лепёшке",
           items: group.filter((p) => isSandwich(p) && !hasBreadChoice(p)),
         },
+        {
+          title: "Завтраки",
+          note: "К кашам идёт сет из дополнительных добавок для ярких впечатлений",
+          items: group.filter((p) => p.group === "Завтраки"),
+        },
+        {
+          title: "Салаты и закуски",
+          items: group.filter((p) => p.group === "Салаты"),
+        },
+        { title: "Супы", items: group.filter((p) => p.group === "Супы") },
+        { title: "Горячее", items: group.filter((p) => p.group === "Горячее") },
         { title: "Наггетсы", items: group.filter((p) => p.group === "Наггетсы") },
         { title: "Соусы", items: group.filter((p) => p.group === "Соусы") },
       ];
@@ -405,7 +426,7 @@ function menuResults() {
           (part) =>
             `<div class="food-part"><h3>${part.title}</h3>${part.note ? `<p class="food-note">${part.note}</p>` : ""}${grid(part.items)}</div>`,
         )
-        .join("")}</section>`;
+        .join("")}<p class="food-note allergy-note">Если у тебя аллергия на какие-то продукты — пожалуйста, сообщи нам при заказе.</p></section>`;
     })
     .join("");
 }
@@ -611,6 +632,10 @@ function addLine(line) {
 function addProduct(id) {
   const p = menu.find((x) => x.id === id);
   if (!p) return;
+  if (p.stop) {
+    toast(`«${p.name}» временно закончился — команда поставила его в стоп-лист`);
+    return false;
+  }
   // Sandwiches go through the builder: bread first, then optional extras.
   if (isSandwich(p)) return openBuilder(id);
   addLine({ id });
@@ -654,7 +679,11 @@ function productDetail(id) {
     ? "Рисунок временный — фото напитка появится позже. Уточнить состав можно у бариста."
     : "Уточнить состав можно у бариста.";
   openSheet(
-    `${sheetHead(safe(p.name))}${art}<div class="detail-description"><h3>${safe(p.name)} <span>${money(p.price)}</span></h3>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}<p class="fine">${note}</p></div><button class="primary full" data-detail-add="${p.id}">Добавить в корзину · ${money(p.price)} ${icon("plus")}</button>`,
+    `${sheetHead(safe(p.name))}${art}<div class="detail-description"><h3>${safe(p.name)} <span>${money(p.price)}</span></h3>${p.desc ? `<p>${safe(p.desc)}</p>` : ""}<p class="fine">${note}</p></div>${
+      p.stop
+        ? `<button class="primary full" disabled>Временно в стоп-листе</button>`
+        : `<button class="primary full" data-detail-add="${p.id}">Добавить в корзину · ${money(p.price)} ${icon("plus")}</button>`
+    }`,
   );
 }
 let builder = null;
