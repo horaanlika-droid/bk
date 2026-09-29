@@ -16,7 +16,35 @@
     <link rel="stylesheet" href="style.css" />
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
   </head>
-  <body>
+  <body class="is-preloading">
+    <div
+      id="preloader"
+      class="preloader"
+      role="group"
+      aria-label="Загрузка приложения"
+    >
+      <div class="preloader-card">
+        <img
+          class="preloader-logo"
+          src="assets/logo.png"
+          alt="Большой Кофе"
+        />
+        <p class="preloader-brand">БОЛЬШОЙ КОФЕ</p>
+        <p class="preloader-message">Готовим для тебя</p>
+        <div
+          class="preloader-progress"
+          role="progressbar"
+          aria-label="Загрузка приложения"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <span id="preloaderBar"></span>
+        </div>
+        <span id="preloaderPercent" class="preloader-percent">0%</span>
+      </div>
+      <small class="preloader-credit">app by @stonym0ntana</small>
+    </div>
     <header class="topbar">
       <a class="brand" href="#home" aria-label="Большой Кофе — главная"
         ><img src="assets/logo.png" alt="" /><span

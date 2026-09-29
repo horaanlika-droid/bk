@@ -74,6 +74,20 @@ async function boot(hash = "#menu") {
   return { window, doc, main, menu, errors, wait, open };
 }
 
+test("startup splash shows the brand and a live percent before finishing", { skip: !jsdom }, async () => {
+  const app = await boot("#home");
+  const splash = app.doc.querySelector("#preloader");
+  assert.ok(splash);
+  assert.equal(splash.querySelector(".preloader-logo").getAttribute("src"), "assets/logo.png");
+  assert.equal(splash.querySelector(".preloader-credit").textContent.trim(), "app by @stonym0ntana");
+  assert.equal(splash.querySelector('[role="progressbar"]').getAttribute("aria-valuemax"), "100");
+  assert.equal(app.doc.body.classList.contains("is-preloading"), true);
+  await app.wait(1850);
+  assert.equal(splash.querySelector("#preloaderPercent").textContent, "100%");
+  assert.equal(splash.classList.contains("preloader-done"), true);
+  assert.equal(app.doc.body.classList.contains("is-preloading"), false);
+});
+
 // A broken page keeps the rest of the app alive and only replaces its own
 // section, so the error text lives inside #main and has to be read there.
 function assertPageWorks(main, label) {

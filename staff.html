@@ -35,9 +35,10 @@
       <section id="login" class="login" hidden>
         <h1>Привет, команда!</h1>
         <p>
-          Здесь живут стоп-лист и гоу-лист кухни и бара, состав смены и
-          внутренние вопросы. Логин и пароль выдаёт управляющий или старший
-          смены — командой <b>/adduser</b> в рабочем боте.
+          Здесь живут стоп- и гоу-листы, смена и внутренние вопросы. Повар
+          заполняет технологические карты блюд — алгоритм приготовления бот
+          приложит к заказу. Доступ выдаёт администратор командой
+          <b>/adduser</b> в рабочем боте; набор разделов зависит от роли.
         </p>
         <form id="loginForm">
           <label class="form-label" for="login-input">Логин</label>
@@ -73,6 +74,7 @@
           <button data-tab="go">Гоу-лист <i id="goCount" hidden>0</i></button>
           <button data-tab="shift">Смена</button>
           <button data-tab="board">Вопросы <i id="boardCount" hidden>0</i></button>
+          <button data-tab="recipes" hidden>Техкарты <i id="recipeCount" hidden>0</i></button>
         </nav>
         <div id="tabContent"></div>
       </section>

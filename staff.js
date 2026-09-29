@@ -1,9 +1,7 @@
-// Team page: stop list and go list for the kitchen and the bar, today's
-// shift roster and an internal question board. Access is personal — the
-// admin issues a login and password in the bot (/adduser); the server signs
-// every change with the account's name, so «кто поставил стоп» is never a
-// guess. Kept to ES2020 like app.js: old WebViews drop the whole script on
-// newer syntax.
+// Team page: station-specific stop/go lists, kitchen recipe cards, today's
+// shift roster and an internal question board. Access is personal — admins
+// issue roles in the bot; the server enforces permissions and signs changes
+// with the account's name. Kept to ES2020 like app.js for older WebViews.
 const $ = (s) => document.querySelector(s);
 const safe = (s) =>
   String(s).replace(
@@ -39,11 +37,24 @@ try {
 } catch {
   me = null;
 }
-let state = { stop: [], go: [], shift: [], board: [], menu: [] };
+let state = {
+  stop: [],
+  go: [],
+  shift: [],
+  board: [],
+  recipes: {},
+  menu: [],
+  permissions: { viewStations: [], manageStations: [], recipes: false, shift: true, board: true },
+};
 let tab = "stop";
 let station = "Кухня";
 let shiftRole = "Бар";
+let selectedRecipeId = "";
 let pollTimer = null;
+const staffPermissions = () =>
+  state.permissions ||
+  (me && me.permissions) ||
+  { viewStations: [], manageStations: [], recipes: false, shift: true, board: true };
 
 function toast(text, ms = 3000) {
   const el = document.createElement("div");
@@ -119,11 +130,30 @@ const stationTag = (s) =>
 // --- Стоп-лист и гоу-лист -------------------------------------------------
 function listTab(kind) {
   const isStop = kind === "stop";
-  const entries = state[kind] || [];
+  const permissions = staffPermissions();
+  const viewStations = permissions.viewStations || [];
+  const manageStations = permissions.manageStations || [];
+  if (manageStations.length && !manageStations.includes(station))
+    station = manageStations[0];
+  const entries = (state[kind] || []).filter((entry) =>
+    viewStations.includes(entry.station),
+  );
+  const canManage = manageStations.length > 0;
   const options = (state.menu || [])
+    .filter((p) => p.station === station)
     .map((p) => `<option value="${safe(p.name)}"></option>`)
     .join("");
-  return `<div class="tool-card"><h2>${isStop ? "Поставить на стоп" : "Добавить в гоу-лист"}</h2>
+  const stationPicker =
+    manageStations.length > 1
+      ? `<div class="chips" role="group" aria-label="Станция">${manageStations
+          .map(
+            (s) =>
+              `<button type="button" data-station="${s}" class="${station === s ? "selected" : ""}">${s}</button>`,
+          )
+          .join("")}</div>`
+      : `<p class="fine">Рабочая зона: <b>${safe(manageStations[0] || "только просмотр")}</b></p>`;
+  const form = canManage
+    ? `<div class="tool-card"><h2>${isStop ? "Поставить на стоп" : "Добавить в гоу-лист"}</h2>
   <p class="hint">${
     isStop
       ? "Позиция из меню пропадёт из продажи у гостей: карточка покажет «Стоп», заказ с ней не пройдёт. Можно вписать и то, чего нет в меню — молоко, сироп, тарталетки."
@@ -134,23 +164,25 @@ function listTab(kind) {
     <datalist id="menuList">${options}</datalist>
   </div>
   ${isStop ? "" : '<div class="row"><input id="itemNote" placeholder="Комментарий (по желанию): почему предлагаем" maxlength="120"></div>'}
-  <div class="chips" role="group" aria-label="Станция">
-    ${["Кухня", "Бар"].map((s) => `<button type="button" data-station="${s}" class="${station === s ? "selected" : ""}">${s}</button>`).join("")}
-  </div>
-  <button class="primary full" type="submit">${isStop ? "В стоп-лист" : "В гоу-лист"}</button></form></div>
+  ${stationPicker}
+  <button class="primary full" type="submit">${isStop ? "В стоп-лист" : "В гоу-лист"}</button></form></div>`
+    : '<div class="tool-card"><h2>Только просмотр</h2><p class="hint">Изменять стоп- и гоу-листы может повар своей кухни, бариста своего бара или администратор.</p></div>';
+  return `${form}
   <p class="list-title">${isStop ? "Сейчас на стопе" : "Сейчас в гоу-листе"}</p>
   ${
     entries.length
       ? entries
           .map(
-            (e) => `<div class="entry">${stationTag(e.station)}<div class="entry-info"><b>${safe(e.name)}</b><small>${safe([signature(e), e.note].filter(Boolean).join(" · "))}</small></div><div class="entry-actions"><button data-remove="${kind}:${safe(e.id)}">${isStop ? "Вернуть в продажу" : "Убрать"}</button></div></div>`,
+            (e) => `<div class="entry">${stationTag(e.station)}<div class="entry-info"><b>${safe(e.name)}</b><small>${safe([signature(e), e.note].filter(Boolean).join(" · "))}</small></div>${manageStations.includes(e.station) ? `<div class="entry-actions"><button data-remove="${kind}:${safe(e.id)}">${isStop ? "Вернуть в продажу" : "Убрать"}</button></div>` : ""}</div>`,
           )
           .join("")
       : `<div class="empty-list">${isStop ? "Стоп-лист пуст — всё в продаже 👌" : "Гоу-лист пуст. Добавь, что сегодня продаём активнее."}</div>`
   }`;
 }
 function bindListTab(kind) {
-  $("#listForm").addEventListener("submit", (e) => {
+  const form = $("#listForm");
+  if (!form) return;
+  form.addEventListener("submit", (e) => {
     e.preventDefault();
     const name = $("#itemName").value.trim();
     if (!name) return;
@@ -168,6 +200,55 @@ function bindListTab(kind) {
       kind === "stop" ? "Поставлено на стоп" : "Добавлено в гоу-лист",
     );
   });
+}
+
+// --- Технологические карты кухни -----------------------------------------
+function recipesTab() {
+  const dishes = (state.menu || []).filter((item) => item.category === "Еда");
+  const recipes = state.recipes || {};
+  if (!dishes.length)
+    return '<div class="empty-list">В меню пока нет блюд кухни.</div>';
+  if (!dishes.some((item) => item.id === selectedRecipeId))
+    selectedRecipeId = dishes[0].id;
+  const recipe = recipes[selectedRecipeId] || {};
+  const filled = dishes.filter((item) => recipes[item.id] && recipes[item.id].text).length;
+  const options = dishes
+    .map(
+      (item) =>
+        `<option value="${safe(item.id)}" ${item.id === selectedRecipeId ? "selected" : ""}>${safe(item.name)}${item.group ? " · " + safe(item.group) : ""}</option>`,
+    )
+    .join("");
+  return `<div class="tool-card"><h2>Технологическая карта блюда</h2>
+  <p class="hint">Добавьте порядок действий, подготовку и важные детали. При новом заказе алгоритм отправится в Telegram рядом с заказом.</p>
+  <p class="fine">Заполнено карт: ${filled} из ${dishes.length}.</p>
+  <form id="recipeForm">
+    <label class="form-label" for="recipeDish">Блюдо</label>
+    <select id="recipeDish" required>${options}</select>
+    <label class="form-label" for="recipeText">Алгоритм действий</label>
+    <textarea id="recipeText" maxlength="2000" placeholder="Например: 1. Подготовить…\n2. Приготовить…\n3. Проверить подачу…" required>${safe(recipe.text || "")}</textarea>
+    <p class="fine">До 2 000 символов. Указания по количеству заказа бот покажет рядом с картой.</p>
+    <button class="primary full" type="submit">Сохранить техкарту</button>
+  </form>
+  ${recipe.text ? `<div class="entry"><div class="entry-info"><b>Карта сохранена</b><small>${safe([signature(recipe), recipe.by ? "автор: " + recipe.by : ""].filter(Boolean).join(" · "))}</small></div><div class="entry-actions"><button class="danger" type="button" data-clear-recipe="${safe(selectedRecipeId)}">Удалить</button></div></div>` : ""}
+  </div>`;
+}
+function bindRecipesTab() {
+  const select = $("#recipeDish");
+  if (select)
+    select.addEventListener("change", () => {
+      selectedRecipeId = select.value;
+      renderTab();
+    });
+  const form = $("#recipeForm");
+  if (form)
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      act(
+        "/api/staff/recipes",
+        { itemId: $("#recipeDish").value, text: $("#recipeText").value },
+        "Технологическая карта сохранена",
+      );
+    });
 }
 
 // --- Смена ------------------------------------------------------------------
@@ -213,26 +294,47 @@ function boardTab() {
 }
 
 function renderTab() {
-  const counts = { stop: "#stopCount", go: "#goCount", board: "#boardCount" };
-  for (const [key, sel] of Object.entries(counts)) {
+  const permissions = staffPermissions();
+  const allowed = {
+    stop: (permissions.viewStations || []).length > 0,
+    go: (permissions.viewStations || []).length > 0,
+    shift: !!permissions.shift,
+    board: !!permissions.board,
+    recipes: !!permissions.recipes,
+  };
+  const available = Object.keys(allowed).filter((key) => allowed[key]);
+  if (!allowed[tab]) tab = available[0] || "shift";
+  const counts = {
+    stop: "#stopCount",
+    go: "#goCount",
+    board: "#boardCount",
+    recipes: "#recipeCount",
+  };
+  for (const [key, selector] of Object.entries(counts)) {
     const list =
       key === "board"
-        ? (state.board || []).filter((n) => !n.done)
-        : state[key] || [];
-    $(sel).textContent = list.length;
-    $(sel).hidden = !list.length;
+        ? (state.board || []).filter((entry) => !entry.done)
+        : key === "recipes"
+          ? Object.values(state.recipes || {}).filter((entry) => entry && entry.text)
+          : state[key] || [];
+    const badge = $(selector);
+    badge.textContent = list.length;
+    badge.hidden = !list.length;
   }
-  document.querySelectorAll("[data-tab]").forEach((b) => {
-    b.classList.toggle("selected", b.dataset.tab === tab);
+  document.querySelectorAll("[data-tab]").forEach((button) => {
+    button.hidden = !allowed[button.dataset.tab];
+    button.classList.toggle("selected", button.dataset.tab === tab);
   });
   const views = {
     stop: () => listTab("stop"),
     go: () => listTab("go"),
     shift: shiftTab,
     board: boardTab,
+    recipes: recipesTab,
   };
   $("#tabContent").innerHTML = views[tab]();
   if (tab === "stop" || tab === "go") bindListTab(tab);
+  if (tab === "recipes") bindRecipesTab();
   if (tab === "shift")
     $("#shiftForm").addEventListener("submit", (e) => {
       e.preventDefault();
@@ -305,11 +407,7 @@ document.addEventListener("click", (e) => {
     }
     if (b.dataset.station) {
       station = b.dataset.station;
-      document
-        .querySelectorAll("[data-station]")
-        .forEach((x) =>
-          x.classList.toggle("selected", x.dataset.station === station),
-        );
+      renderTab();
     }
     if (b.dataset.role) {
       shiftRole = b.dataset.role;
@@ -327,6 +425,12 @@ document.addEventListener("click", (e) => {
     }
     if (b.dataset.toggle)
       act("/api/staff/board", { action: "toggle", id: b.dataset.toggle });
+    if (b.dataset.clearRecipe)
+      act(
+        "/api/staff/recipes",
+        { action: "remove", itemId: b.dataset.clearRecipe },
+        "Техкарта удалена",
+      );
   } catch (err) {
     toast("Что-то пошло не так: " + err.message, 5000);
   }

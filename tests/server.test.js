@@ -5,11 +5,58 @@ import { mkdtemp, cp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
+import http from "node:http";
 import { once } from "node:events";
+import { randomBytes, scryptSync } from "node:crypto";
 
-let process, directory, base;
+let process, directory, base, fakeTelegram;
+const telegramCalls = [];
+const telegramCallListeners = new Set();
+const telegramUpdates = [
+  {
+    update_id: 1,
+    message: {
+      chat: { id: 222222, type: "private" },
+      from: { id: 222222 },
+      text: "/start",
+    },
+  },
+  {
+    update_id: 2,
+    message: {
+      chat: { id: 123456789, type: "private" },
+      from: { id: 123456789, username: "boss" },
+      text: "/adduser botcook Иван Повар повар",
+    },
+  },
+  {
+    update_id: 3,
+    message: {
+      chat: { id: 123456789, type: "private" },
+      from: { id: 123456789, username: "boss" },
+      text: "/grant botcook админ",
+    },
+  },
+];
+function waitForTelegramCall(predicate, timeout = 5000) {
+  const found = telegramCalls.find(predicate);
+  if (found) return Promise.resolve(found);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      telegramCallListeners.delete(listener);
+      reject(new Error("Timed out waiting for a Telegram API call"));
+    }, timeout);
+    const listener = (call) => {
+      if (!predicate(call)) return;
+      clearTimeout(timer);
+      telegramCallListeners.delete(listener);
+      resolve(call);
+    };
+    telegramCallListeners.add(listener);
+  });
+}
 before(async () => {
-  // Isolated server: test orders never touch the app's data or Telegram.
+  // Isolated server and local Telegram stub: tests never reach real Telegram or app data.
   directory = await mkdtemp(join(tmpdir(), "bk-test-"));
   for (const file of [
     "server.js",
@@ -28,6 +75,30 @@ before(async () => {
     });
   }
   await writeFile(join(directory, ".env"), "TEST_SECRET=not-public");
+  fakeTelegram = http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const url = new URL(req.url, "http://telegram.test");
+    const method = url.pathname.split("/").pop();
+    let result = true;
+    if (method === "getUpdates") {
+      const offset = Number(url.searchParams.get("offset") || 0);
+      result = telegramUpdates.filter((update) => update.update_id >= offset);
+    } else {
+      let body = {};
+      try {
+        body = JSON.parse(raw || "{}");
+      } catch {}
+      const call = { method, body };
+      telegramCalls.push(call);
+      for (const listener of [...telegramCallListeners]) listener(call);
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result }));
+  });
+  fakeTelegram.listen(0, "127.0.0.1");
+  await once(fakeTelegram, "listening");
+  const telegramApiUrl = `http://127.0.0.1:${fakeTelegram.address().port}`;
   const socket = net.createServer();
   socket.listen(0, "127.0.0.1");
   await once(socket, "listening");
@@ -39,8 +110,10 @@ before(async () => {
     env: {
       ...globalThis.process.env,
       PORT: String(port),
-      BOT_TOKEN: "",
-      ADMIN_IDS: "",
+      BOT_TOKEN: "test-token",
+      ADMIN_IDS: "123456789",
+      APP_URL: "https://app.example.test/miniapp",
+      TELEGRAM_API_URL: telegramApiUrl,
       STAFF_PIN: "test-staff-pin",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -58,7 +131,41 @@ after(async () => {
     process.kill();
     await exited;
   }
+  if (fakeTelegram) await new Promise((resolve) => fakeTelegram.close(resolve));
   if (directory) await rm(directory, { recursive: true, force: true });
+});
+
+test("Telegram welcomes guests, configures the blue app button and grants roles to admins", async () => {
+  const welcome = await waitForTelegramCall(
+    (call) => call.method === "sendMessage" && call.body.chat_id === 222222,
+  );
+  assert.match(welcome.body.text, /синюю кнопку/);
+  assert.equal(
+    welcome.body.reply_markup.inline_keyboard[0][0].web_app.url,
+    "https://app.example.test/miniapp",
+  );
+  const menuButton = await waitForTelegramCall(
+    (call) => call.method === "setChatMenuButton",
+  );
+  assert.equal(menuButton.body.menu_button.text, "Открыть приложение");
+  assert.equal(menuButton.body.menu_button.web_app.url, "https://app.example.test/miniapp");
+  const added = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      String(call.body.text).includes("✅ Доступ выдан"),
+  );
+  assert.match(added.body.text, /Роль: повар/);
+  assert.match(added.body.text, /технологические карты/);
+  const granted = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      call.body.chat_id === 123456789 &&
+      String(call.body.text).includes("✅ Права обновлены"),
+  );
+  assert.match(granted.body.text, /Роль: админ/);
+  const stored = JSON.parse(await readFile(join(directory, "data/staff.json"), "utf8"));
+  assert.equal(stored.accounts.find((account) => account.login === "botcook").role, "админ");
 });
 
 test("menu and public assets load with correct MIME types", async () => {
@@ -458,10 +565,16 @@ test("sheets follow the visible area and failures never dead-end", async () => {
 // the question board.
 test("staff access is personal and issued by the admin in the bot", async () => {
   const source = await readFile(join(directory, "server.js"), "utf8");
-  // Account management lives in the admin branch of the bot: /adduser,
-  // /newpass, /deluser, /team — the same people who control orders.
-  assert.match(source, /\/\^\\\/\(team\|adduser\|newpass\|deluser\)/);
+  // Account management lives in the admin branch of the bot and lets the
+  // configured admins issue accounts and change their role-based powers.
+  assert.ok(source.includes("(team|adduser|newpass|deluser|setrole|grant|roles)"));
   assert.match(source, /admins\.includes\(String\(m\.chat\.id\)\)/);
+  assert.match(source, /Полные команды бота доступны только ID из ADMIN_IDS/);
+  assert.match(source, /setChatMenuButton/);
+  assert.match(source, /web_app: \{ url: appUrl \}/);
+  assert.match(source, /Добро пожаловать в «Большой Кофе»/);
+  assert.match(source, /function orderPreparationMessages\(order\)/);
+  assert.match(source, /const preparation = orderPreparationMessages\(order\)/);
   assert.match(source, /function createAccount\(/);
   // Passwords are stored only as salted scrypt hashes.
   assert.match(source, /crypto\.scryptSync/);
@@ -505,6 +618,139 @@ const staffPost = (token, path, body) =>
     headers: { "Content-Type": "application/json", "X-Staff-Token": token },
     body: JSON.stringify(body),
   });
+async function addTestStaffAccount(login, name, role, password = "test-password") {
+  const filename = join(directory, "data/staff.json");
+  let state = {};
+  try {
+    state = JSON.parse(await readFile(filename, "utf8"));
+  } catch {}
+  state.accounts = state.accounts || [];
+  state.sessions = state.sessions || {};
+  state.stop = state.stop || [];
+  state.go = state.go || [];
+  state.shift = state.shift || [];
+  state.board = state.board || [];
+  state.recipes = state.recipes || {};
+  const salt = randomBytes(8).toString("hex");
+  state.accounts = state.accounts.filter((account) => account.login !== login);
+  state.accounts.push({
+    login,
+    name,
+    role,
+    salt,
+    hash: scryptSync(password, salt, 32).toString("hex"),
+  });
+  await writeFile(filename, JSON.stringify(state, null, 2));
+  return password;
+}
+async function loginAsStaff(login, password) {
+  const response = await fetch(base + "/api/staff/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login, password }),
+  });
+  assert.equal(response.status, 200, "staff login should succeed for " + login);
+  return response.json();
+}
+async function staffStateFor(token) {
+  const response = await fetch(base + "/api/staff/state", {
+    headers: { "X-Staff-Token": token },
+  });
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
+test("roles separate kitchen, bar, read-only, admin and recipe permissions", async () => {
+  const password = "test-password";
+  await addTestStaffAccount("cook1", "Шеф", "шеф-повар", password);
+  await addTestStaffAccount("barista1", "Бариста", "бариста", password);
+  await addTestStaffAccount("cashier1", "Кассир", "касса", password);
+  await addTestStaffAccount("manager1", "Управляющий", "управляющий", password);
+  const cook = await loginAsStaff("cook1", password);
+  const barista = await loginAsStaff("barista1", password);
+  const cashier = await loginAsStaff("cashier1", password);
+  const manager = await loginAsStaff("manager1", password);
+
+  const cookState = await staffStateFor(cook.token);
+  assert.deepEqual(cookState.permissions.manageStations, ["Кухня"]);
+  assert.equal(cookState.permissions.recipes, true);
+  assert.deepEqual(cookState.me.permissions.manageStations, ["Кухня"]);
+  assert.deepEqual((await staffStateFor(barista.token)).permissions.manageStations, ["Бар"]);
+  assert.equal((await staffStateFor(barista.token)).permissions.recipes, false);
+  assert.deepEqual((await staffStateFor(cashier.token)).permissions.manageStations, []);
+  assert.deepEqual((await staffStateFor(manager.token)).permissions.manageStations, ["Кухня", "Бар"]);
+
+  assert.equal(
+    (await staffPost(cook.token, "/api/staff/stop", {
+      name: "Не мой бар",
+      station: "Бар",
+    })).status,
+    403,
+    "a cook cannot edit the bar list",
+  );
+  assert.equal(
+    (await staffPost(barista.token, "/api/staff/go", {
+      name: "Не моя кухня",
+      station: "Кухня",
+    })).status,
+    403,
+    "a barista cannot edit the kitchen list",
+  );
+  assert.equal(
+    (await staffPost(cook.token, "/api/staff/stop", {
+      itemId: "большой-латте",
+      name: "Большой латте",
+      station: "Кухня",
+    })).status,
+    400,
+    "a kitchen operator cannot mislabel a drink as a kitchen item",
+  );
+  assert.equal(
+    (await staffPost(cashier.token, "/api/staff/stop", {
+      name: "Только просмотр",
+      station: "Кухня",
+    })).status,
+    403,
+  );
+
+  const recipe = await staffPost(cook.token, "/api/staff/recipes", {
+    itemId: "сырники",
+    text: "1. Подготовить ингредиенты.\n2. Приготовить и проверить подачу.",
+  });
+  assert.equal(recipe.status, 200);
+  assert.equal((await recipe.json()).recipes["сырники"].by, "Шеф");
+  const placed = await fetch(base + "/api/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      items: [{ id: "сырники", qty: 1 }],
+      type: "pickup",
+      branch: "Волжский",
+      customer: { name: "Тест", phone: "+7 900 000-00-02" },
+    }),
+  });
+  assert.equal(placed.status, 201);
+  const placedOrder = await placed.json();
+  const instructions = await waitForTelegramCall(
+    (call) =>
+      call.method === "sendMessage" &&
+      String(call.body.text).includes(`Алгоритм действий по блюдам заказа #${placedOrder.id}`),
+  );
+  assert.match(instructions.body.text, /Сырники × 1/);
+  assert.match(instructions.body.text, /Подготовить ингредиенты/);
+  assert.equal(
+    (await staffPost(barista.token, "/api/staff/recipes", {
+      itemId: "сырники",
+      text: "Не разрешено",
+    })).status,
+    403,
+    "recipe cards are for cooks and managers only",
+  );
+  assert.deepEqual((await staffStateFor(barista.token)).recipes, {});
+  assert.equal((await staffStateFor(manager.token)).recipes["сырники"].text.startsWith("1."), true);
+  const admin = await staffLogin();
+  assert.deepEqual((await staffStateFor(admin)).permissions.manageStations, ["Кухня", "Бар"]);
+});
 
 test("stop list removes an item from sale until the team returns it", async () => {
   const token = await staffLogin();
@@ -611,6 +857,14 @@ test("go list, shift roster and question board work end to end", async () => {
     (await staffPost(token, "/api/staff/board", { text: "после выхода" })).status,
     401,
   );
+});
+
+test("food subcategories have stronger visual separation", async () => {
+  const style = await readFile(join(directory, "style.css"), "utf8");
+  assert.match(style, /\.food-group > h2\s*\{/);
+  assert.match(style, /\.food-part\s*\{[\s\S]*?border-left: 4px solid var\(--yellow\)/);
+  assert.match(style, /\.food-part h3::before\s*\{/);
+  assert.match(style, /@media \(max-width: 680px\)\s*\{[\s\S]*?\.food-part\s*\{/);
 });
 
 test("the /staff page is served while team data stays private", async () => {

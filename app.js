@@ -1,4 +1,44 @@
 const $ = (s) => document.querySelector(s);
+const appPreloader = (() => {
+  const root = $("#preloader");
+  if (!root) return { ready: () => {} };
+  const progress = root.querySelector(".preloader-progress");
+  const bar = $("#preloaderBar");
+  const label = $("#preloaderPercent");
+  const startedAt = Date.now();
+  let value = 0;
+  let ready = false;
+  const setProgress = (next) => {
+    value = Math.max(value, Math.min(100, Math.round(next)));
+    if (bar) bar.style.width = value + "%";
+    if (label) label.textContent = value + "%";
+    if (progress) progress.setAttribute("aria-valuenow", String(value));
+  };
+  const tick = () => {
+    const elapsed = Date.now() - startedAt;
+    setProgress(Math.min(90, 6 + elapsed * 0.042));
+    if (!ready || elapsed < 2000) {
+      window.setTimeout(tick, 45);
+      return;
+    }
+    setProgress(100);
+    window.setTimeout(() => {
+      root.classList.add("preloader-done");
+      root.setAttribute("aria-hidden", "true");
+      document.body.classList.remove("is-preloading");
+      window.setTimeout(() => {
+        if (root.parentNode) root.parentNode.removeChild(root);
+      }, 500);
+    }, 180);
+  };
+  setProgress(6);
+  window.setTimeout(tick, 45);
+  return {
+    ready() {
+      ready = true;
+    },
+  };
+})();
 // Inside Telegram the SDK is present, but window.Telegram.WebApp also exists
 // in a regular browser — only initData tells that we really run in the client.
 const tg = window.Telegram?.WebApp;
@@ -1200,6 +1240,7 @@ async function loadMenu() {
     loading = false;
     render();
     persist();
+    appPreloader.ready();
   }
 }
 // Anything not caught above (timers, listeners added later) is reported too.
