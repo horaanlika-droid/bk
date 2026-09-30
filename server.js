@@ -312,6 +312,30 @@ function staffState() {
     state.shift.some((s) => s.date !== today()) || state.board.length > 100;
   state.shift = state.shift.filter((s) => s.date === today());
   state.board = state.board.slice(0, 100);
+  // Keep legacy free-text entries only when they resolve to a real catalogue
+  // item; from now on both lists are strictly tied to menu product ids.
+  for (const kind of ["stop", "go"]) {
+    const linked = [];
+    for (const entry of state[kind]) {
+      const product = menu.find((item) => item.id === entry.itemId) ||
+        menu.find((item) => item.name.toLocaleLowerCase("ru") === String(entry.name || "").toLocaleLowerCase("ru"));
+      if (!product) {
+        changed = true;
+        continue;
+      }
+      const normalized = {
+        ...entry,
+        itemId: product.id,
+        name: product.name,
+        station: stationForProduct(product),
+      };
+      if (normalized.itemId !== entry.itemId || normalized.name !== entry.name || normalized.station !== entry.station)
+        changed = true;
+      if (!linked.some((existing) => existing.itemId === product.id)) linked.push(normalized);
+      else changed = true;
+    }
+    state[kind] = linked;
+  }
   if (
     !state.recipes ||
     typeof state.recipes !== "object" ||
@@ -573,10 +597,7 @@ function screenMain(chatId, userId) {
         { text: "➕ Добавить админа", callback_data: "m:addadmin" },
       ],
       ...(isOwner
-        ? [
-            [{ text: "📝 Управление меню", callback_data: "m:menu" }],
-            [{ text: "🎵 Техкарты (Рецепты)", callback_data: "m:recipes" }],
-          ]
+        ? [[{ text: "🎵 Техкарты (Рецепты)", callback_data: "m:recipes" }]]
         : []),
       ...(staffUrl
         ? [
@@ -717,97 +738,6 @@ function screenHelp(chatId, userId) {
   };
 }
 
-// ---------- Menu management screens (owner only) ----------
-function screenMenu(chatId, userId) {
-  if (!isOwnerAdmin(userId)) {
-    return {
-      text: "⛔ Только главный администратор (ADMIN_IDS) может редактировать меню.",
-      keyboard: [backRow],
-    };
-  }
-  const categories = ["Кофе", "Чай", "Напитки", "Еда", "Десерты"];
-  return {
-    text:
-      "📋 Управление меню\n\n" +
-      "Выберите действие:",
-    keyboard: [
-      [{ text: "📄 Список позиций", callback_data: "m:menulist" }],
-      [{ text: "➕ Добавить позицию", callback_data: "m:menuadd" }],
-      [{ text: "◀️ В меню", callback_data: "m:main" }],
-    ],
-  };
-}
-
-function screenMenuList(chatId, userId) {
-  if (!isOwnerAdmin(userId)) {
-    return { text: "⛔ Только главный администратор.", keyboard: [backRow] };
-  }
-  const lines = menu
-    .slice(0, 30)
-    .map(
-      (p) =>
-        `· ${p.name} — ${money(p.price)} · ${p.category}${p.group ? " · " + p.group : ""} · id: ${p.id}`,
-    );
-  return {
-    text:
-      "📄 Позиции меню (показано до 30):\n\n" +
-      (lines.length ? lines.join("\n") : "Меню пусто") +
-      (menu.length > 30 ? `\n\n… и ещё ${menu.length - 30} позиций` : ""),
-    keyboard: [
-      ...menu.slice(0, 20).map((p) => [
-        {
-          text: `✏️ ${p.name} (${money(p.price)})`,
-          callback_data: `menuedit:${p.id}`,
-        },
-      ]),
-      [{ text: "◀️ К меню", callback_data: "m:menu" }],
-      [{ text: "➕ Добавить позицию", callback_data: "m:menuadd" }],
-    ],
-  };
-}
-
-function screenMenuEdit(chatId, userId, itemId) {
-  if (!isOwnerAdmin(userId)) {
-    return { text: "⛔ Только главный администратор.", keyboard: [backRow] };
-  }
-  const item = menu.find((p) => p.id === itemId);
-  if (!item) {
-    return { text: "⚠️ Позиция не найдена", keyboard: [{ text: "◀️ К списку", callback_data: "m:menulist" }] };
-  }
-  const isFood = item.category === "Еда";
-  const hasBreads = Array.isArray(item.breads) && item.breads.length > 0;
-  const extrasCount = Array.isArray(item.extras) ? item.extras.length : 0;
-  return {
-    text:
-      `✏️ Редактирование: ${item.name}\n\n` +
-      `ID: ${item.id}\n` +
-      `Категория: ${item.category}\n` +
-      `Цена: ${money(item.price)}\n` +
-      `Группа: ${item.group || "—"}\n` +
-      `Описание: ${item.desc || "—"}\n` +
-      (isFood ? `Хлеб: ${hasBreadChoice(item) ? "на выбор" : "только " + (item.breads?.[0]?.name || "—")}\n` : "") +
-      `Добавки: ${extrasCount}\n` +
-      `Фото: ${item.art || "нет"}`,
-    keyboard: [
-      [{ text: "🗑️ Удалить", callback_data: `menudel:${itemId}` }],
-      [{ text: "◀️ К списку", callback_data: "m:menulist" }],
-    ],
-  };
-}
-
-function screenMenuAdd(chatId, userId) {
-  if (!isOwnerAdmin(userId)) {
-    return { text: "⛔ Только главный администратор.", keyboard: [backRow] };
-  }
-  setPending(userId, { kind: "menuadd", step: "name" });
-  return {
-    text:
-      "➕ Добавить позицию меню\n\n" +
-      "Введите название позиции:",
-    keyboard: [[{ text: "Отмена", callback_data: "cancel" }]],
-  };
-}
-
 // --- Технологические карты (рецепты) в боте -------------------------------
 function screenRecipes(chatId, userId) {
   if (!isOwnerAdmin(userId)) {
@@ -848,9 +778,6 @@ function screenRecipes(chatId, userId) {
   };
 }
 
-// Helper functions for menu editing
-
-
 const screens = {
   main: screenMain,
   orders: screenOrders,
@@ -859,10 +786,6 @@ const screens = {
   go: (chatId, userId) => screenList("go"),
   admins: screenAdmins,
   addadmin: screenAddAdmin,
-  menu: (chatId, userId) => screenMenu(chatId, userId),
-  menulist: (chatId, userId) => screenMenuList(chatId, userId),
-  menuedit: (chatId, userId, itemId) => screenMenuEdit(chatId, userId, itemId),
-  menuadd: (chatId, userId) => screenMenuAdd(chatId, userId),
   recipes: (chatId, userId) => screenRecipes(chatId, userId),
   help: screenHelp,
 };
@@ -936,35 +859,70 @@ const takePending = (userId) => {
   }
   return task;
 };
-async function finishListAdd(chatId, from, task, station) {
-  const chosen = allStations.find(
-    (s) => s.toLowerCase() === String(station || "").trim().toLowerCase(),
-  );
-  if (!chosen) {
-    await telegram("sendMessage", {
-      chat_id: chatId,
-      text: "Напишите «Кухня» или «Бар» — или /cancel, чтобы отменить.",
-    });
-    return;
+const normalizeSearchText = (value) =>
+  String(value || "")
+    .toLocaleLowerCase("ru")
+    .replace(/ё/g, "е")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+function searchMenuProducts(query) {
+  const normalized = normalizeSearchText(query);
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+  return menu
+    .map((product) => {
+      const haystack = normalizeSearchText(
+        [product.name, product.category, product.group, product.desc].join(" "),
+      );
+      if (!words.every((word) => haystack.includes(word))) return null;
+      const name = normalizeSearchText(product.name);
+      const score = (name === normalized ? 1000 : 0) +
+        (name.startsWith(normalized) ? 100 : 0) +
+        words.reduce((sum, word) => sum + (name.includes(word) ? 10 : 0), 0);
+      return { product, score };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || a.product.name.localeCompare(b.product.name, "ru"))
+    .slice(0, 10)
+    .map(({ product }) => product);
+}
+async function showListSearchResults(chatId, userId, task, query) {
+  const matches = searchMenuProducts(query);
+  setPending(userId, { ...task, step: "search", query });
+  await telegram("sendMessage", {
+    chat_id: chatId,
+    text: matches.length
+      ? `Найдено в меню по запросу «${query}». Выберите нужную позицию:`
+      : `В меню ничего не найдено по запросу «${query}». Попробуйте другие ключевые слова.`,
+    reply_markup: {
+      inline_keyboard: [
+        ...matches.map((product) => [{
+          text: `${product.name} · ${money(product.price)}`,
+          callback_data: `pick:${task.kind}:${product.id}`,
+        }]),
+        [{ text: "Отмена", callback_data: "cancel" }],
+      ],
+    },
+  });
+}
+async function finishListAdd(chatId, from, task, product) {
+  if (!product || !menu.some((item) => item.id === product.id)) {
+    clearPending(from.id);
+    await telegram("sendMessage", { chat_id: chatId, text: "Позиция больше не найдена в меню." });
+    return showScreen(chatId, task.kind, undefined, String(from.id));
   }
   clearPending(from.id);
-  const name = String(task.name || "").trim();
   const state = staffState();
-  const product = menu.find((p) => p.name.toLowerCase() === name.toLowerCase());
-  const finalStation = product ? stationForProduct(product) : chosen;
-  if (state[task.kind].some((x) => x.name === name && x.station === finalStation)) {
-    await telegram("sendMessage", {
-      chat_id: chatId,
-      text: `«${name}» уже в списке`,
-    });
-    await showScreen(chatId, task.kind, undefined, userId);
-    return;
+  const station = stationForProduct(product);
+  if (state[task.kind].some((x) => x.itemId === product.id)) {
+    await telegram("sendMessage", { chat_id: chatId, text: `«${product.name}» уже в списке` });
+    return showScreen(chatId, task.kind, undefined, String(from.id));
   }
   const entry = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    itemId: product ? product.id : "",
-    name,
-    station: finalStation,
+    itemId: product.id,
+    name: product.name,
+    station,
     note: "",
     by: personName(from) || "админ",
     at: new Date().toISOString(),
@@ -972,13 +930,13 @@ async function finishListAdd(chatId, from, task, station) {
   state[task.kind].unshift(entry);
   writeStaff(state);
   notifyAdmins(
-    `${task.kind === "stop" ? "🛑 Стоп-лист" : "📣 Гоу-лист"} (${finalStation.toLowerCase()}): «${name}» — ${entry.by}`,
+    `${task.kind === "stop" ? "🛑 Стоп-лист" : "📣 Гоу-лист"} (${station.toLowerCase()}): «${product.name}» — ${entry.by}`,
   );
   await telegram("sendMessage", {
     chat_id: chatId,
-    text: task.kind === "stop" ? `✅ «${name}» снято с продажи` : `🏁 «${name}» в гоу-листе`,
+    text: task.kind === "stop" ? `✅ «${product.name}» снято с продажи` : `🏁 «${product.name}» в гоу-листе`,
   });
-  await showScreen(chatId, task.kind, undefined, userId);
+  await showScreen(chatId, task.kind, undefined, String(from.id));
 }
 async function handlePendingAnswer(m, task, text) {
   const chatId = m.chat.id;
@@ -987,20 +945,6 @@ async function handlePendingAnswer(m, task, text) {
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .trim()
     .slice(0, 60);
-  
-  // --- Stop/Go List Station Selection ---
-  if (task.step === "station")
-    return finishListAdd(chatId, m.from, task, name || " ");
-  
-  // --- Menu Add Flow (Owner Admin Only) ---
-  if (task.kind === "menuadd") {
-    if (!isOwnerAdmin(userId)) {
-      clearPending(userId);
-      await telegram("sendMessage", { chat_id: chatId, text: "⛔ Только главный администратор." });
-      return showScreen(chatId, "main", undefined, userId);
-    }
-    return handleMenuAddPending(chatId, userId, task, name);
-  }
   
   // --- Recipe Edit Flow (Owner Admin Only) ---
   if (task.kind === "recipeedit") {
@@ -1011,127 +955,15 @@ async function handlePendingAnswer(m, task, text) {
     }
     return handleRecipeEditPending(chatId, userId, task, name);
   }
-  
-  // --- Stop/Go List Name Input ---
+
   if (!name) {
     await telegram("sendMessage", {
       chat_id: chatId,
-      text: "Напишите название — или /cancel, чтобы отменить.",
+      text: "Введите ключевые слова для поиска позиции в меню или /cancel.",
     });
     return;
   }
-  const product = menu.find((p) => p.name.toLowerCase() === name.toLowerCase());
-  if (product)
-    return finishListAdd(chatId, m.from, { ...task, name }, stationForProduct(product));
-  // Not in the menu — milk, syrup, tart shells. The station cannot be guessed.
-  setPending(userId, { ...task, step: "station", name });
-  await telegram("sendMessage", {
-    chat_id: chatId,
-    text: `«${name}» нет в меню. Куда это относится?`,
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "🍳 Кухня", callback_data: "st:Кухня" },
-          { text: "🥤 Бар", callback_data: "st:Бар" },
-        ],
-        [{ text: "Отмена", callback_data: "cancel" }],
-      ],
-    },
-  });
-}
-
-// --- Menu Add Pending Handler (Multi-step: Name -> Category -> Price -> Desc -> Group -> Breads -> Extras) ---
-async function handleMenuAddPending(chatId, userId, task, input) {
-  const clean = (v, n) => String(v || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, n);
-  const cleanBlock = (v, n) => String(v || "").replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim().slice(0, n);
-  
-  if (task.step === "name") {
-    if (!input) { await ask(chatId, "Название не может быть пустым. Введите название:"); return; }
-    setPending(userId, { ...task, step: "category", name: clean(input, 100) });
-    await ask(chatId, "Категория (например: Еда, Напитки, Закуски):");
-    return;
-  }
-  
-  if (task.step === "category") {
-    if (!input) { await ask(chatId, "Категория обязательна. Введите категорию:"); return; }
-    setPending(userId, { ...task, step: "price", category: clean(input, 40) });
-    await ask(chatId, "Цена (число, например: 150):");
-    return;
-  }
-  
-  if (task.step === "price") {
-    const price = Number(input);
-    if (isNaN(price) || price <= 0) { await ask(chatId, "Неверная цена. Введите число больше 0:"); return; }
-    setPending(userId, { ...task, step: "desc", price: price });
-    await ask(chatId, "Описание (или '-' чтобы пропустить):");
-    return;
-  }
-  
-  if (task.step === "desc") {
-    const desc = input === "-" ? "" : cleanBlock(input, 500);
-    setPending(userId, { ...task, step: "group", desc: desc });
-    await ask(chatId, "Группа/Подкатегория (или '-' чтобы пропустить):");
-    return;
-  }
-  
-  if (task.step === "group") {
-    const group = input === "-" ? "" : clean(input, 40);
-    setPending(userId, { ...task, step: "breads", group: group });
-    await ask(chatId, "Хлеба (ID:Название, через запятую. Пример: 1:Батон,2:Лаваш. '-' чтобы пропустить):");
-    return;
-  }
-  
-  if (task.step === "breads") {
-    const breads = [];
-    if (input !== "-") {
-      input.split(",").forEach(p => {
-        const parts = p.split(":");
-        if (parts.length === 2) breads.push({ id: clean(parts[0], 40), name: clean(parts[1], 40) });
-      });
-    }
-    setPending(userId, { ...task, step: "extras", breads: breads });
-    await ask(chatId, "Добавки (ID:Название:Цена:Группа, через точку с запятой. Пример: 1:Сыр:50:Топпинг;2:Соус:30:Соус. '-' чтобы пропустить):");
-    return;
-  }
-  
-  if (task.step === "extras") {
-    const extras = [];
-    if (input !== "-") {
-      input.split(";").forEach(p => {
-        const parts = p.split(":");
-        if (parts.length >= 3) extras.push({ id: clean(parts[0], 60), name: clean(parts[1], 60), price: Number(parts[2]) || 0, group: clean(parts[3] || "", 40) });
-      });
-    }
-    // Create the item
-    const item = {
-      id: clean(task.name, 80) || Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      name: task.name,
-      category: task.category,
-      price: task.price,
-      desc: task.desc,
-      group: task.group,
-      breads: task.breads,
-      extras: task.extras,
-      art: ""
-    };
-    
-    if (menu.some(p => p.id === item.id)) {
-      await telegram("sendMessage", { chat_id: chatId, text: "⚠️ Позиция с таким ID уже существует. Измените название или удалите старую." });
-      clearPending(userId);
-      return showScreen(chatId, "menuadd", undefined, userId);
-    }
-    
-    menu.unshift(item);
-    writeMenu(menu);
-    notifyAdmins(`📝 Меню: добавлена позиция «${item.name}» (${item.category}) — ${personName(m.from) || "админ"}`);
-    clearPending(userId);
-    await telegram("sendMessage", { chat_id: chatId, text: `✅ Позиция «${item.name}» успешно добавлена!` });
-    return showScreen(chatId, "menulist", undefined, userId);
-  }
-  
-  async function ask(cid, txt) {
-    await telegram("sendMessage", { chat_id: cid, text: txt, reply_markup: { inline_keyboard: [[{ text: "Отмена", callback_data: "cancel" }]] } });
-  }
+  return showListSearchResults(chatId, userId, task, name);
 }
 
 // --- Recipe Edit Pending Handler ---
@@ -1340,28 +1172,31 @@ async function handleCallback(q) {
   }
   if (/^new:/.test(data)) {
     const kind = data.slice(4) === "go" ? "go" : "stop";
-    setPending(userId, { kind, step: "name" });
+    setPending(userId, { kind, step: "search" });
     await answer();
     await telegram("sendMessage", {
       chat_id: chatId,
-      text:
-        kind === "stop"
-          ? "Что поставить на стоп? Напишите название — позицию из меню или продукт: молоко, сироп, тарталетки."
-          : "Что добавить в гоу-лист? Напишите название — позицию из меню или что угодно: «пирог дня».",
+      text: "Введите ключевые слова для поиска позиции в существующем меню. Выберите точное совпадение из списка.",
       reply_markup: {
         inline_keyboard: [[{ text: "Отмена", callback_data: "cancel" }]],
       },
     });
     return;
   }
-  if (/^st:/.test(data)) {
+  if (/^pick:(stop|go):/.test(data)) {
+    const [, kind, itemId] = data.split(":");
     const task = takePending(userId);
-    if (!task) {
-      await answer("Начните заново: меню → «Добавить в стоп»");
-      return showScreen(chatId, "main", messageId, userId);
+    if (!task || task.kind !== kind || task.step !== "search") {
+      await answer("Начните заново: меню → выберите стоп-лист или гоу-лист");
+      return showScreen(chatId, kind, messageId, userId);
     }
-    await finishListAdd(chatId, q.from, task, data.slice(3));
-    return;
+    const product = menu.find((item) => item.id === itemId);
+    if (!product) {
+      await answer("Этой позиции больше нет в меню", true);
+      return showScreen(chatId, kind, messageId, userId);
+    }
+    await answer();
+    return finishListAdd(chatId, q.from, task, product);
   }
   if (/^add:/.test(data)) {
     const id = data.slice(4);
@@ -1402,25 +1237,6 @@ async function handleCallback(q) {
   if (data === "m:link") {
     await answer();
     return sendStaffLink(chatId);
-  }
-  if (/^menuedit:/.test(data)) {
-    const itemId = data.slice(9);
-    await answer();
-    return showScreen(chatId, "menuedit", messageId, userId, itemId);
-  }
-  if (/^menudel:/.test(data)) {
-    if (!isOwnerAdmin(userId))
-      return answer("Только главный администратор может удалять позиции", true);
-    const itemId = data.slice(8);
-    const item = menu.find((p) => p.id === itemId);
-    if (item) {
-      const idx = menu.findIndex((p) => p.id === itemId);
-      menu.splice(idx, 1);
-      writeMenu(menu);
-      notifyAdmins(`🗑️ Позиция удалена: «${item.name}» — ${personName(q.from) || "админ"}`);
-    }
-    await answer("Позиция удалена");
-    return showScreen(chatId, "menulist", messageId, userId);
   }
   if (/^recipeedit:/.test(data)) {
     if (!isOwnerAdmin(userId))
@@ -1723,24 +1539,18 @@ const server = http.createServer(async (req, res) => {
           );
           return json(res, 200, staffPublicState(staffState()));
         }
-        const station = allStations.includes(body.station) ? body.station : "";
-        if (!station) return json(res, 400, { error: "Укажи станцию: Кухня или Бар" });
         const itemId = clean(body.itemId, 80);
         const typedName = clean(body.name, 80);
         const product = itemId
           ? menu.find((p) => p.id === itemId)
-          : menu.find((p) => p.name.toLowerCase() === typedName.toLowerCase());
-        if (itemId && !product)
-          return json(res, 400, { error: "Позиция меню не найдена" });
-        if (product && stationForProduct(product) !== station)
-          return json(res, 400, { error: `«${product.name}» относится к станции «${stationForProduct(product)}»` });
-        const name = product ? product.name : typedName;
-        if (!name) return json(res, 400, { error: "Укажи позицию" });
-        if (
-          state[list].some(
-            (x) => x.name === name && x.station === station,
-          )
-        )
+          : menu.find((p) => p.name.toLocaleLowerCase("ru") === typedName.toLocaleLowerCase("ru"));
+        if (!product)
+          return json(res, 400, { error: "Выбери позицию из меню по ключевым словам" });
+        const station = stationForProduct(product);
+        if (body.station && allStations.includes(body.station) && body.station !== station)
+          return json(res, 400, { error: `«${product.name}» относится к станции «${station}»` });
+        const name = product.name;
+        if (state[list].some((x) => x.itemId === product.id))
           return json(res, 409, { error: `«${name}» уже в списке` });
         state[list].unshift({
           id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
@@ -1839,7 +1649,7 @@ const server = http.createServer(async (req, res) => {
     const entry = readCoins()[key] || { coins: 0 };
     const pending = read()
       .filter((o) => !o.credited && coinsKey(o.customer) === key)
-      .reduce((s, o) => s + plannedCoins(o.total), 0);
+      .reduce((s, o) => s + plannedCoins(o.items), 0);
     return json(res, 200, { coins: entry.coins || 0, pending });
   }
   if (url.pathname === "/api/health")

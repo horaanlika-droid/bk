@@ -367,3 +367,31 @@ textarea {
   text-align: center;
   line-height: 1.45;
 }
+.menu-matches {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.menu-match {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  text-align: left;
+}
+.menu-match small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.selected-menu-item {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fff8d9;
+  font-size: 12px;
+}
