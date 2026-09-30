@@ -146,10 +146,6 @@ function listTab(kind) {
     viewStations.includes(entry.station),
   );
   const canManage = manageStations.length > 0;
-  const options = (state.menu || [])
-    .filter((p) => p.station === station)
-    .map((p) => `<option value="${safe(p.name)}"></option>`)
-    .join("");
   const stationPicker =
     manageStations.length > 1
       ? `<div class="chips" role="group" aria-label="Станция">${manageStations
@@ -163,16 +159,17 @@ function listTab(kind) {
     ? `<div class="tool-card"><h2>${isStop ? "Поставить на стоп" : "Добавить в гоу-лист"}</h2>
   <p class="hint">${
     isStop
-      ? "Позиция из меню пропадёт из продажи у гостей: карточка покажет «Стоп», заказ с ней не пройдёт. Можно вписать и то, чего нет в меню — молоко, сироп, тарталетки."
-      : "Гоу-лист — что сегодня предлагаем в первую очередь: заканчивается срок, много заготовки, новинка."
+      ? "Найдите позицию по ключевым словам и выберите её из меню. Она пропадёт из продажи у гостей, а заказ с ней не пройдёт."
+      : "Найдите позицию по ключевым словам и выберите её из меню. Гоу-лист подсказывает, что сегодня предлагаем в первую очередь."
   }</p>
-  <form id="listForm"><div class="row">
-    <input id="itemName" list="menuList" placeholder="Позиция или продукт…" maxlength="80" required>
-    <datalist id="menuList">${options}</datalist>
-  </div>
-  ${isStop ? "" : '<div class="row"><input id="itemNote" placeholder="Комментарий (по желанию): почему предлагаем" maxlength="120"></div>'}
-  ${stationPicker}
-  <button class="primary full" type="submit">${isStop ? "В стоп-лист" : "В гоу-лист"}</button></form></div>`
+  <form id="listForm">
+    <div class="row"><input id="itemSearch" placeholder="Ключевые слова для поиска в меню…" maxlength="80" autocomplete="off"></div>
+    <div id="menuMatches" class="menu-matches" aria-live="polite"><p class="fine">Начните вводить название блюда или напитка.</p></div>
+    <input id="selectedItemId" type="hidden" required>
+    ${isStop ? "" : '<div class="row"><input id="itemNote" placeholder="Комментарий (по желанию): почему предлагаем" maxlength="120"></div>'}
+    ${stationPicker}
+    <button class="primary full" type="submit">${isStop ? "В стоп-лист" : "В гоу-лист"}</button>
+  </form></div>`
     : '<div class="tool-card"><h2>Только просмотр</h2><p class="hint">Изменять стоп- и гоу-листы может повар своей кухни, бариста своего бара или администратор.</p></div>';
   return `${form}
   <p class="list-title">${isStop ? "Сейчас на стопе" : "Сейчас в гоу-листе"}</p>
@@ -189,18 +186,56 @@ function listTab(kind) {
 function bindListTab(kind) {
   const form = $("#listForm");
   if (!form) return;
+  const search = $("#itemSearch");
+  const matches = $("#menuMatches");
+  const selected = $("#selectedItemId");
+  let selectedName = "";
+  const renderMatches = () => {
+    const words = search.value
+      .toLocaleLowerCase("ru")
+      .replace(/ё/g, "е")
+      .split(/[^a-zа-я0-9]+/i)
+      .filter(Boolean);
+    selected.value = "";
+    selectedName = "";
+    if (!words.length) {
+      matches.innerHTML = '<p class="fine">Начните вводить название блюда или напитка.</p>';
+      return;
+    }
+    const found = (state.menu || [])
+      .filter((item) => item.station === station)
+      .map((item) => ({
+        item,
+        haystack: [item.name, item.category, item.group]
+          .join(" ").toLocaleLowerCase("ru").replace(/ё/g, "е"),
+      }))
+      .filter(({ haystack }) => words.every((word) => haystack.includes(word)))
+      .slice(0, 8);
+    matches.innerHTML = found.length
+      ? found.map(({ item }) => `<button type="button" class="menu-match" data-pick-item="${safe(item.id)}" data-pick-name="${safe(item.name)}"><b>${safe(item.name)}</b><small>${safe(item.category)} · ${safe(item.station)}</small></button>`).join("")
+      : '<p class="fine">В этой станции совпадений нет. Попробуйте другие ключевые слова.</p>';
+  };
+  search.addEventListener("input", renderMatches);
+  matches.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-pick-item]");
+    if (!button) return;
+    selected.value = button.dataset.pickItem;
+    selectedName = button.dataset.pickName;
+    search.value = selectedName;
+    matches.innerHTML = `<p class="selected-menu-item">Выбрано из меню: <b>${safe(selectedName)}</b></p>`;
+  });
   form.addEventListener("submit", (e) => {
     e.preventDefault();
-    const name = $("#itemName").value.trim();
-    if (!name) return;
-    const match = (state.menu || []).find(
-      (p) => p.name.toLowerCase() === name.toLowerCase(),
-    );
+    if (!selected.value) {
+      toast("Сначала найдите и выберите позицию из меню", 4000);
+      search.focus();
+      return;
+    }
     act(
       "/api/staff/" + kind,
       {
-        itemId: match ? match.id : "",
-        name,
+        itemId: selected.value,
+        name: selectedName,
         station,
         note: $("#itemNote") ? $("#itemNote").value.trim() : "",
       },

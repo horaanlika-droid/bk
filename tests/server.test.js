@@ -195,6 +195,7 @@ test("Telegram welcomes guests and hands admins an inline menu", async () => {
   const labels = buttons.map((button) => button.text).join(" ");
   for (const label of ["📋 Заказы", "💳 Оплатить", "🛑 Стоп-лист", "🏁 Гоу-лист", "👥 Админы", "➕ Добавить админа", "❓ Помощь"])
     assert.ok(labels.includes(label), "the menu offers " + label);
+  assert.ok(!buttons.some((button) => /управление меню/i.test(button.text)), "catalog editing is not offered in the bot");
   // The team page opens straight from the chat, no password involved.
   const staff = buttons.find((button) => button.web_app?.url);
   assert.equal(staff.web_app.url, "https://app.example.test/staff");
@@ -687,7 +688,7 @@ test("the menu works without the API", async () => {
   assert.match(app, /const sources = \["\/api\/menu", "\/menu\.json"\]/);
   assert.match(app, /menuSource = url/);
   const source = await readFile(join(directory, "server.js"), "utf8");
-  assert.match(source, /const menu = JSON\.parse\(fs\.readFileSync/);
+  assert.match(source, /let menu = JSON\.parse\(fs\.readFileSync\(path\.join\(root, "menu\.json"\)/);
 });
 
 // «The same errors came back» usually means the WebView still runs an old
@@ -919,14 +920,15 @@ test("every admin has every right: no roles, no stations split by role", async (
   assert.doesNotMatch(source, /manageStations\.includes/);
   const token = await staffLogin();
   // Both stations are editable by the same person.
-  for (const station of ["Кухня", "Бар"]) {
+  for (const [station, itemId] of [["Кухня", "сырники"], ["Бар", "большой-латте"]]) {
     const response = await staffPost(token, "/api/staff/stop", {
-      name: "Тест " + station,
+      itemId,
       station,
     });
     assert.equal(response.status, 200, station);
     const stop = (await response.json()).stop;
     assert.equal(stop[0].station, station);
+    assert.equal(stop[0].itemId, itemId);
     await staffPost(token, "/api/staff/stop", {
       action: "remove",
       id: stop[0].id,
@@ -969,9 +971,8 @@ test("every admin has every right: no roles, no stations split by role", async (
   );
 });
 
-// The whole menu is buttons: paying an order and running the stop list never
-// needs a command to be typed out.
-test("the inline menu pays an order and runs the stop list", async () => {
+// Stop/go entries are selected from the existing menu by a keyword search.
+test("the inline menu searches menu products for the stop list", async () => {
   const orders = JSON.parse(
     await readFile(join(directory, "data/orders.json"), "utf8"),
   );
@@ -985,17 +986,10 @@ test("the inline menu pays an order and runs the stop list", async () => {
     },
   });
   const paid = await waitForTelegramCall(
-    (call) =>
-      call.method === "answerCallbackQuery" &&
-      /коинов/i.test(String(call.body.text)),
+    (call) => call.method === "answerCallbackQuery" && /коинов/i.test(String(call.body.text)),
   );
   assert.match(paid.body.text, new RegExp("#" + unpaid.id));
-  const credited = JSON.parse(
-    await readFile(join(directory, "data/orders.json"), "utf8"),
-  );
-  assert.equal(credited.find((order) => order.id === unpaid.id).credited, true);
-  // «Добавить в стоп» asks for a name, then for the station of an item that is
-  // not in the menu, and remembers the answer.
+
   pushUpdate({
     callback_query: {
       id: "cb-new-stop",
@@ -1005,57 +999,39 @@ test("the inline menu pays an order and runs the stop list", async () => {
     },
   });
   const asked = await waitForTelegramCall(
-    (call) =>
-      call.method === "sendMessage" &&
-      call.body.chat_id === 123456789 &&
-      /Что поставить на стоп/.test(String(call.body.text)),
+    (call) => call.method === "sendMessage" && call.body.chat_id === 123456789 && /ключевые слова/.test(String(call.body.text)),
   );
-  assert.ok(
-    asked.body.reply_markup.inline_keyboard
-      .flat()
-      .some((button) => button.callback_data === "cancel"),
-    "the question can be cancelled",
-  );
+  assert.ok(asked.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "cancel"));
   pushUpdate({
     message: {
       chat: { id: 123456789, type: "private" },
       from: { id: 123456789, first_name: "Босс", username: "boss" },
-      text: "Молоко",
+      text: "сырн",
     },
   });
-  const station = await waitForTelegramCall(
-    (call) =>
-      call.method === "sendMessage" &&
-      call.body.chat_id === 123456789 &&
-      /Куда это относится/.test(String(call.body.text)),
+  const results = await waitForTelegramCall(
+    (call) => call.method === "sendMessage" && call.body.chat_id === 123456789 && /Найдено в меню/.test(String(call.body.text)),
   );
-  assert.ok(
-    station.body.reply_markup.inline_keyboard[0].some(
-      (button) => button.callback_data === "st:Бар",
-    ),
-  );
+  const pick = results.body.reply_markup.inline_keyboard.flat().find((button) => button.callback_data === "pick:stop:сырники");
+  assert.ok(pick, "keyword search returns the exact menu item as a button");
   pushUpdate({
     callback_query: {
-      id: "cb-station",
+      id: "cb-pick-stop",
       from: { id: 123456789, first_name: "Босс" },
-      data: "st:Бар",
-      message: { chat: { id: 123456789 }, message_id: 33, text: "куда" },
+      data: pick.callback_data,
+      message: { chat: { id: 123456789 }, message_id: 33, text: "выбрать" },
     },
   });
   const done = await waitForTelegramCall(
-    (call) =>
-      call.method === "sendMessage" &&
-      call.body.chat_id === 123456789 &&
-      /снято с продажи/.test(String(call.body.text)),
+    (call) => call.method === "sendMessage" && call.body.chat_id === 123456789 && /снято с продажи/.test(String(call.body.text)),
   );
-  assert.match(done.body.text, /Молоко/);
-  const stopped = JSON.parse(
-    await readFile(join(directory, "data/staff.json"), "utf8"),
-  );
-  assert.equal(stopped.stop[0].name, "Молоко");
-  assert.equal(stopped.stop[0].station, "Бар");
-  assert.equal(stopped.stop[0].by, "Босс", "the change is signed by the admin");
-  // A menu item knows its own station, so it never asks.
+  assert.match(done.body.text, /Сырники/);
+  const stopped = JSON.parse(await readFile(join(directory, "data/staff.json"), "utf8"));
+  assert.equal(stopped.stop[0].name, "Сырники");
+  assert.equal(stopped.stop[0].itemId, "сырники");
+  assert.equal(stopped.stop[0].station, "Кухня");
+  assert.equal(stopped.stop[0].by, "Босс");
+
   pushUpdate({
     message: {
       chat: { id: 123456789, type: "private" },
@@ -1064,12 +1040,8 @@ test("the inline menu pays an order and runs the stop list", async () => {
     },
   });
   await waitForTelegramCall(
-    (call) =>
-      call.method === "sendMessage" &&
-      call.body.chat_id === 123456789 &&
-      /Стоп-лист:/.test(String(call.body.text)),
+    (call) => call.method === "sendMessage" && call.body.chat_id === 123456789 && /Стоп-лист:/.test(String(call.body.text)),
   );
-  // And one tap on the entry returns it to sale.
   pushUpdate({
     callback_query: {
       id: "cb-rm",
@@ -1079,14 +1051,10 @@ test("the inline menu pays an order and runs the stop list", async () => {
     },
   });
   const back = await waitForTelegramCall(
-    (call) =>
-      call.method === "answerCallbackQuery" &&
-      /Вернули в продажу/.test(String(call.body.text)),
+    (call) => call.method === "answerCallbackQuery" && /Вернули в продажу/.test(String(call.body.text)),
   );
   assert.ok(back);
-  const after = JSON.parse(
-    await readFile(join(directory, "data/staff.json"), "utf8"),
-  );
+  const after = JSON.parse(await readFile(join(directory, "data/staff.json"), "utf8"));
   assert.equal(after.stop.length, 0);
 });
 test("stop list removes an item from sale until the team returns it", async () => {
@@ -1153,15 +1121,24 @@ test("stop list removes an item from sale until the team returns it", async () =
 
 test("go list, shift roster and question board work end to end", async () => {
   const token = await staffLogin();
-  // Go list entries may name things that are not in the menu at all.
-  const go = await staffPost(token, "/api/staff/go", {
+  // Arbitrary free text is refused; menu ids are canonical list entries.
+  const invalidGo = await staffPost(token, "/api/staff/go", {
     name: "Пирог дня",
+    station: "Бар",
+    note: "Срок до вечера",
+  });
+  assert.equal(invalidGo.status, 400);
+  const go = await staffPost(token, "/api/staff/go", {
+    itemId: "большой-латте",
+    name: "неверное имя клиента",
     station: "Бар",
     note: "Срок до вечера",
   });
   assert.equal(go.status, 200);
   const goList = (await go.json()).go;
   assert.equal(goList[0].note, "Срок до вечера");
+  assert.equal(goList[0].itemId, "большой-латте");
+  assert.equal(goList[0].name, "Большой латте", "the API uses the canonical catalog name");
   await staffPost(token, "/api/staff/go", { action: "remove", id: goList[0].id });
   // Shift roster: added for today, duplicates refused.
   const shift = await staffPost(token, "/api/staff/shift", {
